@@ -3,11 +3,14 @@ pub mod history;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tauri::{AppHandle, Emitter, Manager};
 use base64::Engine as _;
 use crate::config::ConfigManager;
 use crate::ai;
+use crate::ai::transcribe_live::LiveTranscribe;
+use crate::config::types::AppConfig;
 use history::{HistoryManager, HistoryRecord};
 
 /// Screenshot selection coordinates from the overlay window
@@ -160,7 +163,8 @@ pub async fn run_silent_pipeline(
     token: CancellationToken,
     template_id: Option<String>,
 ) -> Result<String, String> {
-    let output = execute_pipeline(app, audio_base64, token, template_id, Arc::new(|_| {}))
+    // 本机 HTTP 接口收到的是完整音频文件，没有边录边传的机会，继续走整段路径。
+    let output = execute_pipeline(app, audio_base64, token, template_id, None, Arc::new(|_| {}))
         .await
         .map_err(|failure| failure.message)?;
     Ok(output.final_text)
@@ -190,7 +194,16 @@ pub fn start_recording(app: &AppHandle) -> Option<u32> {
 }
 
 /// Called from shortcut.rs when recording STOPS successfully.
-pub fn process_recording(app: &AppHandle, task_id: u32, audio_base64: String, template_id: String) {
+///
+/// `live` 是录音期间就建立好的流式转写会话（`None` 表示这次没走流式）。它必须
+/// 一路传到转写阶段：中途丢掉只会退化成整段上传，白等一次说话时长。
+pub fn process_recording(
+    app: &AppHandle,
+    task_id: u32,
+    audio_base64: String,
+    template_id: String,
+    live: Option<LiveTranscribe>,
+) {
     let token = {
         let state = app.state::<SharedTaskManager>();
         let mgr = state.lock().unwrap();
@@ -198,11 +211,11 @@ pub fn process_recording(app: &AppHandle, task_id: u32, audio_base64: String, te
     };
     let token = match token {
         Some(t) => t,
-        None => return,
+        None => return, // 任务已被取消；live 在这里落地即被看门狗收掉
     };
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        run_pipeline(&app_handle, task_id, audio_base64, None, token, template_id).await;
+        run_pipeline(&app_handle, task_id, audio_base64, None, token, template_id, live).await;
     });
 }
 
@@ -314,7 +327,8 @@ pub fn retry_record(app: &AppHandle, record_id: u64) -> Result<(), String> {
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        run_pipeline(&app_handle, task_id, audio_base64, Some(record_id), token, template_id).await;
+        // 重试的是历史里那段完整音频，只能走整段路径。
+        run_pipeline(&app_handle, task_id, audio_base64, Some(record_id), token, template_id, None).await;
     });
     Ok(())
 }
@@ -337,6 +351,7 @@ pub(crate) fn build_client(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     app: &AppHandle,
     task_id: u32,
@@ -344,6 +359,7 @@ async fn run_pipeline(
     retry_record_id: Option<u64>,
     token: CancellationToken,
     template_id: String,
+    live: Option<LiveTranscribe>,
 ) {
     let pipeline_started = std::time::Instant::now();
     let observer_app = app.clone();
@@ -370,6 +386,7 @@ async fn run_pipeline(
         audio_base64.clone(),
         token.clone(),
         (!template_id.is_empty()).then_some(template_id),
+        live,
         observer,
     )
     .await
@@ -434,11 +451,41 @@ async fn run_pipeline(
     );
 }
 
+/// 等流式转写的尾段结果。
+///
+/// 任何失败（凭证、建流、流中途报错、超时、结果为空）都返回 `None`，由调用方
+/// 回退整段路径。这里**不套 `with_retry`**：流已经结束，重试只能重新录音。
+/// 失败原因只打日志不报给用户 —— 对用户来说这条路径只是加速，退回去仍然能用。
+async fn await_live_transcribe(config: &AppConfig, live: LiveTranscribe) -> Option<ai::AiOutput> {
+    let timeout = Duration::from_secs(config.advanced.transcribe_timeout as u64);
+    let text = match live.finish(timeout).await {
+        Ok(text) if !text.trim().is_empty() => text,
+        // 空结果按失败处理：真是没说话的话整段路径也会是空，代价只是白跑一次；
+        // 但如果是流式实现本身出了系统性问题，这条日志能让它露出来。
+        Ok(_) => {
+            eprintln!("[Live] 流式转写没有拿到文字，回退整段上传");
+            return None;
+        }
+        Err(e) => {
+            eprintln!("[Live] 流式转写失败，回退整段上传：{}", e);
+            return None;
+        }
+    };
+    match ai::transcribe_live_output(config, text) {
+        Ok(output) => Some(output),
+        Err(e) => {
+            eprintln!("[Live] 流式转写结果无法归集模型信息，回退整段上传：{}", e);
+            None
+        }
+    }
+}
+
 async fn execute_pipeline(
     app: &AppHandle,
     audio_base64: String,
     token: CancellationToken,
     template_id: Option<String>,
+    live: Option<LiveTranscribe>,
     observer: Arc<dyn Fn(PipelineEvent) + Send + Sync>,
 ) -> Result<PipelineOutput, PipelineFailure> {
     let (config, prompts_dir, learning_rules) = {
@@ -461,45 +508,66 @@ async fn execute_pipeline(
     observer(PipelineEvent::Transcribing);
     let retry_observer = observer.clone();
     let transcribe_started = std::time::Instant::now();
-    let transcribe = {
-        let client = client.clone();
-        let audio = audio_base64.clone();
-        let config = config.clone();
-        let prompts_dir = prompts_dir.clone();
-        let learning_rules = learning_rules.clone();
-        tokio::select! {
-            result = ai::retry::with_retry(
-                || {
-                    let client = client.clone();
-                    let audio = audio.clone();
-                    let config = config.clone();
-                    let prompts_dir = prompts_dir.clone();
-                    let learning_rules = learning_rules.clone();
-                    async move {
-                        ai::transcribe(
-                            &client,
-                            &audio,
-                            &config,
-                            &prompts_dir,
-                            &learning_rules,
-                        )
-                        .await
-                    }
-                },
-                config.advanced.max_retries,
-                config.advanced.transcribe_timeout,
-                move |_| retry_observer(PipelineEvent::Retrying),
-            ) => result,
-            _ = token.cancelled() => return Err(PipelineFailure {
-                message: "任务已取消".to_string(),
-                transcribe_text: None,
-            }),
+
+    // 流式路径：录音时就在识别了，这里只等尾段最终结果。失败或结果为空都返回
+    // None，落到下面的整段路径重做一次 —— 用户只会觉得慢，不会看到失败。
+    let live_output = match live {
+        Some(live) => {
+            tokio::select! {
+                output = await_live_transcribe(&config, live) => output,
+                _ = token.cancelled() => return Err(PipelineFailure {
+                    message: "任务已取消".to_string(),
+                    transcribe_text: None,
+                }),
+            }
         }
-    }
-    .map_err(|message| PipelineFailure {
-        message,
-        transcribe_text: None,
-    })?;
+        None => None,
+    };
+
+    let transcribe = match live_output {
+        Some(output) => output,
+        // 整段路径：把录好的 FLAC 一次性传上去。这条路要带 with_retry，
+        // 网络抖动重发一次还有意义（流式那条重试只能重新录音，所以不套）。
+        None => {
+            let client = client.clone();
+            let audio = audio_base64.clone();
+            let config = config.clone();
+            let prompts_dir = prompts_dir.clone();
+            let learning_rules = learning_rules.clone();
+            tokio::select! {
+                result = ai::retry::with_retry(
+                    || {
+                        let client = client.clone();
+                        let audio = audio.clone();
+                        let config = config.clone();
+                        let prompts_dir = prompts_dir.clone();
+                        let learning_rules = learning_rules.clone();
+                        async move {
+                            ai::transcribe(
+                                &client,
+                                &audio,
+                                &config,
+                                &prompts_dir,
+                                &learning_rules,
+                            )
+                            .await
+                        }
+                    },
+                    config.advanced.max_retries,
+                    config.advanced.transcribe_timeout,
+                    move |_| retry_observer(PipelineEvent::Retrying),
+                ) => result,
+                _ = token.cancelled() => return Err(PipelineFailure {
+                    message: "任务已取消".to_string(),
+                    transcribe_text: None,
+                }),
+            }
+        }
+        .map_err(|message| PipelineFailure {
+            message,
+            transcribe_text: None,
+        })?,
+    };
     let transcribe_ms = transcribe_started.elapsed().as_millis() as u64;
 
     let Some(template_id) = template_id else {

@@ -10,6 +10,7 @@ pub mod models;
 pub mod prompt;
 pub mod retry;
 pub mod transcribe_aws;
+pub mod transcribe_live;
 pub mod types;
 
 use crate::config::types::{AppConfig, ThinkingConfig};
@@ -87,6 +88,24 @@ pub async fn transcribe_audio(
         .map_err(|e| tr_fmt("err.audioBase64", &[("error", e.to_string().as_str())]))?;
     let text = transcribe_aws::transcribe(&config.models.aws, flac, opts).await?;
     record_usage(scene, &resolved, TokenUsage::default());
+    Ok(ai_output(text, &resolved))
+}
+
+/// 听写能不能走「边说边转写」。只有解析出来的转写模型确实是 Amazon Transcribe
+/// 才开流：自定义模型可能是别的协议，那条路径没有流式实现。
+pub fn live_transcribe_supported(config: &AppConfig) -> bool {
+    models::resolve_model(config, &config.transcribe.model_id)
+        .map(|resolved| resolved.protocol == PROTOCOL_AWS_TRANSCRIBE)
+        .unwrap_or(false)
+}
+
+/// 给流式转写的结果补上模型信息与用量记录。
+///
+/// 流式路径绕过了 `transcribe_audio`，但 `usage.jsonl` 的行数语义必须保持不变：
+/// 每次录音仍然只有一条 `transcribe` 行，且模型字段与整段路径一致。
+pub fn transcribe_live_output(config: &AppConfig, text: String) -> Result<AiOutput, String> {
+    let resolved = models::resolve_model(config, &config.transcribe.model_id)?;
+    record_usage("transcribe", &resolved, TokenUsage::default());
     Ok(ai_output(text, &resolved))
 }
 

@@ -6,6 +6,8 @@
 //! （见 prompt.rs `build_optimize_prompt`）。
 
 use aws_sdk_transcribestreaming::error::{DisplayErrorContext, ProvideErrorMetadata};
+use aws_sdk_transcribestreaming::operation::start_stream_transcription::builders::StartStreamTranscriptionFluentBuilder;
+use aws_sdk_transcribestreaming::operation::start_stream_transcription::StartStreamTranscriptionOutput;
 use aws_sdk_transcribestreaming::primitives::Blob;
 use aws_sdk_transcribestreaming::types::error::AudioStreamError;
 use aws_sdk_transcribestreaming::types::{
@@ -18,10 +20,10 @@ use super::aws;
 use crate::config::types::AwsConfig;
 use crate::i18n::{self, tr_fmt, tr_fmt_in, tr_in, Lang};
 
-const LABEL: &str = "Transcribe";
+pub(crate) const LABEL: &str = "Transcribe";
 /// 单个音频事件上限 32 KiB，取一半留余量。
 const AUDIO_EVENT_BYTES: usize = 16 * 1024;
-const SAMPLE_RATE_HZ: i32 = 16_000;
+pub(crate) const SAMPLE_RATE_HZ: i32 = 16_000;
 /// "auto" 模式下的候选语言与首选语言。
 const AUTO_LANGUAGE_OPTIONS: &str = "zh-CN,en-US";
 
@@ -56,7 +58,7 @@ fn stream_error_status(code: &str) -> u16 {
     }
 }
 
-fn format_stream_error<E>(err: &E) -> String
+pub(crate) fn format_stream_error<E>(err: &E) -> String
 where
     E: ProvideErrorMetadata + std::error::Error,
 {
@@ -136,7 +138,7 @@ fn needs_space(prev: &str, next: &str) -> bool {
     last.is_ascii_alphanumeric() || matches!(last, '.' | ',' | '!' | '?' | ';' | ':')
 }
 
-fn collect_result(
+pub(crate) fn collect_result(
     result: &TranscriptResult,
     speaker_labels: bool,
     lang: Lang,
@@ -183,39 +185,30 @@ pub(crate) fn merge_speaker_lines(blocks: &[String], lang: Lang) -> String {
     merged.join("\n")
 }
 
-async fn run_stream(
+/// 按配置挑语言：`auto` 走多语言识别（首选中文），否则锁定单一语言码。
+/// 整段路径与流式路径必须用同一套规则，所以抽在这里共用。
+pub(crate) fn apply_language(
+    request: StartStreamTranscriptionFluentBuilder,
     cfg: &AwsConfig,
-    bytes: Vec<u8>,
-    encoding: MediaEncoding,
+) -> StartStreamTranscriptionFluentBuilder {
+    let language = cfg.transcribe_language.trim();
+    if language.is_empty() || language.eq_ignore_ascii_case("auto") {
+        request
+            .identify_multiple_languages(true)
+            .language_options(AUTO_LANGUAGE_OPTIONS)
+            .preferred_language(LanguageCode::ZhCn)
+    } else {
+        request.language_code(LanguageCode::from(language))
+    }
+}
+
+/// 读完事件流，把 `is_partial == false` 的最终结果拼成文本。
+/// 整段路径与流式路径共用，两边的输出格式因此保证一致。
+pub(crate) async fn collect_transcript(
+    response: &mut StartStreamTranscriptionOutput,
     opts: TranscribeOptions,
     lang: Lang,
 ) -> Result<String, String> {
-    let sdk = aws::sdk_config(&cfg.transcribe_profile, &cfg.transcribe_region).await?;
-    let client = Client::new(&sdk);
-
-    let input = futures_util::stream::iter(audio_events(&bytes));
-    let mut request = client
-        .start_stream_transcription()
-        .media_encoding(encoding)
-        .media_sample_rate_hertz(SAMPLE_RATE_HZ)
-        .show_speaker_label(opts.speaker_labels)
-        .audio_stream(input.into());
-
-    let language = cfg.transcribe_language.trim();
-    if language.is_empty() || language.eq_ignore_ascii_case("auto") {
-        request = request
-            .identify_multiple_languages(true)
-            .language_options(AUTO_LANGUAGE_OPTIONS)
-            .preferred_language(LanguageCode::ZhCn);
-    } else {
-        request = request.language_code(LanguageCode::from(language));
-    }
-
-    let mut response = request
-        .send()
-        .await
-        .map_err(|e| aws::map_sdk_error(LABEL, e))?;
-
     let mut blocks = Vec::new();
     loop {
         let event = response
@@ -238,6 +231,32 @@ async fn run_stream(
     } else {
         Ok(blocks.join("\n"))
     }
+}
+
+async fn run_stream(
+    cfg: &AwsConfig,
+    bytes: Vec<u8>,
+    encoding: MediaEncoding,
+    opts: TranscribeOptions,
+    lang: Lang,
+) -> Result<String, String> {
+    let sdk = aws::sdk_config(&cfg.transcribe_profile, &cfg.transcribe_region).await?;
+    let client = Client::new(&sdk);
+
+    let input = futures_util::stream::iter(audio_events(&bytes));
+    let request = client
+        .start_stream_transcription()
+        .media_encoding(encoding)
+        .media_sample_rate_hertz(SAMPLE_RATE_HZ)
+        .show_speaker_label(opts.speaker_labels)
+        .audio_stream(input.into());
+
+    let mut response = apply_language(request, cfg)
+        .send()
+        .await
+        .map_err(|e| aws::map_sdk_error(LABEL, e))?;
+
+    collect_transcript(&mut response, opts, lang).await
 }
 
 /// 单次转写的音频时长上限（会议分段最长 5.5 分钟，听写最长 3 分钟，这里只是兜底）。

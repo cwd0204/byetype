@@ -4,7 +4,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-use crate::audio::recorder::AudioRecorder;
+use crate::ai::transcribe_live::LiveTranscribe;
+use crate::audio::recorder::{AudioRecorder, LiveAudio};
 use crate::config::ConfigManager;
 
 /// PTT 模式下，按住时间小于此阈值视为误触，丢弃录音。
@@ -14,6 +15,10 @@ const PTT_MIN_DURATION_MS: u64 = 300;
 const READY_POLL_INTERVAL_MS: u64 = 20;
 /// 等待首帧音频的最大轮询次数（20ms × 150 = 3 秒兜底）。
 const READY_POLL_TICKS: u32 = 150;
+
+/// 当前录音对应的流式转写会话。每个停止点都要取走它：不取走只是丢掉加速
+/// （`LiveTranscribe` 自己的看门狗会收尾），但拿不到已经识别好的文字。
+type CurrentLive = Arc<Mutex<Option<LiveTranscribe>>>;
 
 /// Register all 4 global shortcuts (2 voice + 2 image), each bound to its own template_id.
 pub fn register(
@@ -76,6 +81,7 @@ fn register_voice_shortcut(
     let tmpl = template_id;
     // Track the current recording's task_id between start and stop
     let current_task_id: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+    let current_live: CurrentLive = Arc::new(Mutex::new(None));
     let recording_gen: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
 
     app.global_shortcut()
@@ -88,6 +94,7 @@ fn register_voice_shortcut(
                     event.state,
                     &recorder,
                     &current_task_id,
+                    &current_live,
                     &recording_gen,
                     &tmpl,
                 );
@@ -97,6 +104,7 @@ fn register_voice_shortcut(
                     event.state,
                     &recorder,
                     &current_task_id,
+                    &current_live,
                     &recording_gen,
                     &tmpl,
                 );
@@ -114,6 +122,7 @@ fn handle_toggle_event(
     state: ShortcutState,
     recorder: &Arc<AudioRecorder>,
     current_task_id: &Arc<Mutex<Option<u32>>>,
+    current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
 ) {
@@ -129,11 +138,15 @@ fn handle_toggle_event(
         }
 
         let task_id = current_task_id.lock().unwrap().take();
-        match recorder.stop() {
+        // 先停录音流再取流式会话：停止后才到达的帧要排在 `Finish` 之前，
+        // 否则会被丢掉，尾巴上的字就没了。
+        let stopped = recorder.stop();
+        let live = current_live.lock().unwrap().take();
+        match stopped {
             Ok(base64_audio) => {
                 update_tray_icon(app_handle, false);
                 if let Some(tid) = task_id {
-                    crate::task::process_recording(app_handle, tid, base64_audio, tmpl.to_string());
+                    crate::task::process_recording(app_handle, tid, base64_audio, tmpl.to_string(), live);
                 }
             }
             Err(e) => {
@@ -148,7 +161,7 @@ fn handle_toggle_event(
             }
         }
     } else {
-        start_voice_recording(app_handle, recorder, current_task_id, recording_gen, tmpl);
+        start_voice_recording(app_handle, recorder, current_task_id, current_live, recording_gen, tmpl, false);
     }
 }
 
@@ -158,6 +171,7 @@ fn handle_ptt_event(
     state: ShortcutState,
     recorder: &Arc<AudioRecorder>,
     current_task_id: &Arc<Mutex<Option<u32>>>,
+    current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
 ) {
@@ -167,7 +181,7 @@ fn handle_ptt_event(
             if recorder.is_recording() {
                 return;
             }
-            start_voice_recording(app_handle, recorder, current_task_id, recording_gen, tmpl);
+            start_voice_recording(app_handle, recorder, current_task_id, current_live, recording_gen, tmpl, true);
         }
         ShortcutState::Released => {
             // CAS: race against auto-timeout timer.
@@ -182,16 +196,22 @@ fn handle_ptt_event(
             if elapsed < Duration::from_millis(PTT_MIN_DURATION_MS) {
                 // Too short — discard recording, no transcription.
                 let _ = recorder.cancel();
+                if let Some(live) = current_live.lock().unwrap().take() {
+                    live.abort();
+                }
                 update_tray_icon(app_handle, false);
                 if let Some(tid) = task_id {
                     crate::task::cancel_recording(app_handle, tid);
                 }
             } else {
-                match recorder.stop() {
+                // 顺序同 toggle：先停流，再取会话。
+                let stopped = recorder.stop();
+                let live = current_live.lock().unwrap().take();
+                match stopped {
                     Ok(base64_audio) => {
                         update_tray_icon(app_handle, false);
                         if let Some(tid) = task_id {
-                            crate::task::process_recording(app_handle, tid, base64_audio, tmpl.to_string());
+                            crate::task::process_recording(app_handle, tid, base64_audio, tmpl.to_string(), live);
                         }
                     }
                     Err(e) => {
@@ -213,12 +233,15 @@ fn handle_ptt_event(
 /// Shared start logic for both Toggle and PTT modes.
 /// Starts the recorder, allocates a task_id, shows the bubble, and spawns the
 /// max-duration auto-stop timer (which races with manual stop via `recording_gen` CAS).
+#[allow(clippy::too_many_arguments)]
 fn start_voice_recording(
     app_handle: &AppHandle,
     recorder: &Arc<AudioRecorder>,
     current_task_id: &Arc<Mutex<Option<u32>>>,
+    current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
+    ptt: bool,
 ) {
     // Allocate the new generation BEFORE starting the recorder, so that any
     // Release event arriving while `recorder.start()` is still in progress
@@ -242,7 +265,15 @@ fn start_voice_recording(
         }
     };
     *current_task_id.lock().unwrap() = Some(tid);
-    match recorder.start(&mic) {
+
+    // 边说边转写：录音一开始就把音频帧往 channel 里送，但流要等麦克风真的
+    // 出声了才开（见下面的就绪线程）。这段时间的帧在 channel 里排着，开流时
+    // 一次补发，开头不会丢字。协议不支持流式的转写模型直接不开这条路。
+    let feed = crate::ai::live_transcribe_supported(&app_handle.state::<ConfigManager>().get())
+        .then(tokio::sync::mpsc::unbounded_channel::<LiveAudio>);
+    let live_tx = feed.as_ref().map(|(tx, _)| tx.clone());
+
+    match recorder.start(&mic, live_tx) {
         Ok(()) => {
             update_tray_icon(app_handle, true);
 
@@ -254,6 +285,7 @@ fn start_voice_recording(
                 let w_recorder = recorder.clone();
                 let w_app = app_handle.clone();
                 let w_gen = recording_gen.clone();
+                let w_live = current_live.clone();
                 std::thread::spawn(move || {
                     // 兜底 3 秒：设备异常一直不送有效音频时也让气泡转红，不卡在准备中。
                     for _ in 0..READY_POLL_TICKS {
@@ -265,8 +297,12 @@ fn start_voice_recording(
                         }
                         std::thread::sleep(Duration::from_millis(READY_POLL_INTERVAL_MS));
                     }
-                    if w_gen.load(Ordering::SeqCst) == gen {
-                        let _ = crate::bubble::update(&w_app, tid, "recording");
+                    if w_gen.load(Ordering::SeqCst) != gen {
+                        return;
+                    }
+                    let _ = crate::bubble::update(&w_app, tid, "recording");
+                    if let Some((tx, rx)) = feed {
+                        open_live_stream(&w_app, &w_recorder, &w_live, &w_gen, gen, ptt, tx, rx);
                     }
                 });
             }
@@ -276,17 +312,21 @@ fn start_voice_recording(
                 let t_recorder = recorder.clone();
                 let t_app = app_handle.clone();
                 let t_task_id = current_task_id.clone();
+                let t_live = current_live.clone();
                 let t_gen = recording_gen.clone();
                 let t_tmpl = tmpl.to_string();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(max_secs as u64));
                     if t_gen.compare_exchange(gen, gen + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                         let task_id = t_task_id.lock().unwrap().take();
-                        match t_recorder.stop() {
+                        // 顺序同 toggle：先停流，再取会话。
+                        let stopped = t_recorder.stop();
+                        let live = t_live.lock().unwrap().take();
+                        match stopped {
                             Ok(base64_audio) => {
                                 update_tray_icon(&t_app, false);
                                 if let Some(tid) = task_id {
-                                    crate::task::process_recording(&t_app, tid, base64_audio, t_tmpl.clone());
+                                    crate::task::process_recording(&t_app, tid, base64_audio, t_tmpl.clone(), live);
                                 }
                             }
                             Err(e) => {
@@ -313,12 +353,65 @@ fn start_voice_recording(
             // current_task_id so no later path mistakes it for a live
             // recording, and cancel the task to release its slot/bubble.
             *current_task_id.lock().unwrap() = None;
+            if let Some(live) = current_live.lock().unwrap().take() {
+                live.abort();
+            }
             crate::task::cancel_recording(app_handle, tid);
             eprintln!("Start recording error: {}", e);
             let _ = app_handle.emit("recording-error", serde_json::json!({
                 "message": e
             }));
         }
+    }
+}
+
+/// 在就绪线程里开一条流式转写会话，并挂到 `current_live` 上。
+///
+/// PTT 模式额外等到超过误触阈值再开：快按快放本来就要丢弃录音，没必要为它
+/// 真开一条流。这段时间的音频帧仍在 channel 里排着，不会丢。
+#[allow(clippy::too_many_arguments)]
+fn open_live_stream(
+    app_handle: &AppHandle,
+    recorder: &Arc<AudioRecorder>,
+    current_live: &CurrentLive,
+    recording_gen: &Arc<AtomicU32>,
+    gen: u32,
+    ptt: bool,
+    tx: tokio::sync::mpsc::UnboundedSender<LiveAudio>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<LiveAudio>,
+) {
+    if ptt {
+        while recorder.elapsed_since_start().unwrap_or(Duration::ZERO)
+            < Duration::from_millis(PTT_MIN_DURATION_MS)
+        {
+            if recording_gen.load(Ordering::SeqCst) != gen {
+                return; // 已经松手（或被丢弃），不用开流了
+            }
+            std::thread::sleep(Duration::from_millis(READY_POLL_INTERVAL_MS));
+        }
+    }
+    if recording_gen.load(Ordering::SeqCst) != gen {
+        return;
+    }
+
+    let cfg = app_handle.state::<ConfigManager>().get();
+    let live = crate::ai::transcribe_live::start(
+        cfg.models.aws.clone(),
+        tx,
+        rx,
+        Default::default(),
+        crate::i18n::current(),
+    );
+
+    // 持锁时再核对一次 gen。所有停止点都是先 CAS 推进 gen、再锁 current_live 取走
+    // 句柄，所以「持锁期间 gen 没变」就保证了停止点还没走到取的那一步，句柄不会
+    // 挂在没人管的地方。gen 已经变了说明录音结束了，直接放弃这条流。
+    let mut slot = current_live.lock().unwrap();
+    if recording_gen.load(Ordering::SeqCst) == gen {
+        *slot = Some(live);
+    } else {
+        drop(slot);
+        live.abort();
     }
 }
 

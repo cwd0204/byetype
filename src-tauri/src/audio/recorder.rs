@@ -3,6 +3,7 @@ use cpal::SampleFormat;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::encoder;
 
@@ -25,11 +26,36 @@ pub enum RecordingState {
     Recording,
 }
 
+/// 录音进行中实时外送的一帧原始音频。采样率与声道数只在 `start_with_feed`
+/// 内部可见，而消费端（流式转写）要自己混单声道 + 重采样，所以每帧都带上。
+#[derive(Debug, Clone)]
+pub struct PcmFrame {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+/// 实时音频通道上的消息。
+///
+/// `Finish` 必须由停止方显式补发，**不能靠 sender 被 drop 来表示结束**：
+/// cpal 在 macOS 上给非默认输入设备注册了掉线监听（`add_disconnect_listener`），
+/// 那个闭包持有 `Stream` 的 Arc 而它自己又存在同一个 `StreamInner` 里，形成引用
+/// 循环。于是 `drop(Stream)` 不会释放数据回调闭包，闭包里的 sender 也就永远活着，
+/// channel 不会关闭。选了具体麦克风的用户会因此永远等不到「说完了」。
+#[derive(Debug)]
+pub enum LiveAudio {
+    Frame(PcmFrame),
+    Finish,
+}
+
 struct ActiveRecording {
     stream: cpal::Stream,
     samples: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     channels: u16,
+    /// 只是跟着录音一起存放，让 sender 的生命周期看起来完整。真正的结束信号是
+    /// 停止方补发的 `LiveAudio::Finish`（原因见 `LiveAudio` 的注释）。
+    _live_tx: Option<UnboundedSender<LiveAudio>>,
 }
 
 pub struct AudioRecorder {
@@ -70,7 +96,13 @@ impl AudioRecorder {
         self.audio_started.load(Ordering::SeqCst)
     }
 
-    pub fn start(&self, device_name: &str) -> Result<(), String> {
+    /// 开始录音。`live_tx` 不为 `None` 时，每个音频回调都会把原始帧同时送进
+    /// 那个 channel，供边录边转写消费；整段缓冲照旧累积，两条路互不影响。
+    pub fn start(
+        &self,
+        device_name: &str,
+        live_tx: Option<UnboundedSender<LiveAudio>>,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if *state == RecordingState::Recording {
             return Err("Already recording".to_string());
@@ -94,14 +126,25 @@ impl AudioRecorder {
             SampleFormat::F32 => {
                 let sc = Arc::clone(&samples);
                 let started = Arc::clone(&self.audio_started);
+                let tx = live_tx.clone();
                 device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if !started.load(Ordering::Relaxed) && rms(data) > READY_RMS_THRESHOLD {
                             started.store(true, Ordering::SeqCst);
                         }
-                        if let Ok(mut buf) = sc.try_lock() {
-                            buf.extend_from_slice(data);
+                        // 用 lock 而不是 try_lock：try_lock 在锁竞争时会静默丢掉整帧。
+                        // stop() 是先停流再取锁的，这里实际不存在竞争。
+                        sc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .extend_from_slice(data);
+                        if let Some(tx) = &tx {
+                            // UnboundedSender::send 不阻塞，可以在音频回调线程里调。
+                            let _ = tx.send(LiveAudio::Frame(PcmFrame {
+                                samples: data.to_vec(),
+                                sample_rate,
+                                channels,
+                            }));
                         }
                     },
                     |err| eprintln!("Audio stream error: {}", err),
@@ -111,23 +154,25 @@ impl AudioRecorder {
             SampleFormat::I16 => {
                 let sc = Arc::clone(&samples);
                 let started = Arc::clone(&self.audio_started);
+                let tx = live_tx.clone();
                 device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if !started.load(Ordering::Relaxed) && !data.is_empty() {
-                            let sum: f32 = data
-                                .iter()
-                                .map(|&s| {
-                                    let f = s as f32 / 32768.0;
-                                    f * f
-                                })
-                                .sum();
-                            if (sum / data.len() as f32).sqrt() > READY_RMS_THRESHOLD {
-                                started.store(true, Ordering::SeqCst);
-                            }
+                        // 只转一次浮点，整段缓冲与实时通道共用。
+                        let frame: Vec<f32> =
+                            data.iter().map(|&s| s as f32 / 32768.0).collect();
+                        if !started.load(Ordering::Relaxed) && rms(&frame) > READY_RMS_THRESHOLD {
+                            started.store(true, Ordering::SeqCst);
                         }
-                        if let Ok(mut buf) = sc.try_lock() {
-                            buf.extend(data.iter().map(|&s| s as f32 / 32768.0));
+                        sc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .extend_from_slice(&frame);
+                        if let Some(tx) = &tx {
+                            let _ = tx.send(LiveAudio::Frame(PcmFrame {
+                                samples: frame,
+                                sample_rate,
+                                channels,
+                            }));
                         }
                     },
                     |err| eprintln!("Audio stream error: {}", err),
@@ -142,7 +187,13 @@ impl AudioRecorder {
         *state = RecordingState::Recording;
         *self.start_instant.lock().unwrap() = Some(Instant::now());
         let mut active = self.active.lock().unwrap();
-        *active = Some(ActiveRecording { stream, samples, sample_rate, channels });
+        *active = Some(ActiveRecording {
+            stream,
+            samples,
+            sample_rate,
+            channels,
+            _live_tx: live_tx,
+        });
 
         Ok(())
     }
@@ -163,11 +214,18 @@ impl AudioRecorder {
             let _ = recording.stream.pause();
             drop(recording.stream);
 
-            let samples = recording.samples.lock()
+            let mut samples = recording.samples.lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *state = RecordingState::Idle;
             *self.start_instant.lock().unwrap() = None;
-            (samples.clone(), recording.sample_rate, recording.channels)
+            // take 而不是 clone：cpal 在 macOS 上会把数据回调闭包留在一个引用
+            // 循环里（见 LiveAudio 注释），闭包持有的这份 buffer 因此不会随录音
+            // 结束释放。取走内容既省一次大拷贝，也把这段内存还给系统。
+            (
+                std::mem::take(&mut *samples),
+                recording.sample_rate,
+                recording.channels,
+            )
         };
 
         if samples_data.is_empty() {
