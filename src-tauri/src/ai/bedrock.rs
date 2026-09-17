@@ -42,6 +42,38 @@ impl ThinkingMode {
     }
 }
 
+/// 一次请求实际带的思考形态。三态是必要的：`Absent`（不带任何思考字段）与
+/// `Off`（显式 `thinking.type=disabled`）在服务端含义不同 —— Adaptive 代次的
+/// Claude 省略字段时会按默认的自适应思考跑，effort 还取默认高档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingRequest {
+    /// 不带思考字段。Budget 代次关闭思考、以及非 Claude 模型都用这个。
+    Absent,
+    /// 显式关闭。Adaptive 代次的 Claude 必须发，否则等于开着思考。
+    Off,
+    /// 开启，按代次选参数形式。
+    On(ThinkingMode),
+}
+
+fn is_claude(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("claude")
+}
+
+/// 关闭思考时该发什么。
+///
+/// 两代模型省略 thinking 字段的含义是相反的：Adaptive 代次（4.6 及以后，含 5.x）
+/// 省略等于开着自适应思考，必须显式发 `disabled`；Budget 代次（4.5 及更早）省略
+/// 本来就不思考，保持不发。`thinking` 是 Claude 专有字段，非 Claude 模型一律不发。
+fn thinking_off_request(model: &str) -> ThinkingRequest {
+    if !is_claude(model) {
+        return ThinkingRequest::Absent;
+    }
+    match preferred_thinking_mode(model) {
+        ThinkingMode::Adaptive => ThinkingRequest::Off,
+        ThinkingMode::Budget => ThinkingRequest::Absent,
+    }
+}
+
 fn preferred_thinking_mode(model: &str) -> ThinkingMode {
     const BUDGET_GENERATIONS: [&str; 7] = [
         "claude-3",
@@ -116,12 +148,46 @@ fn thinking_fields(mode: ThinkingMode, thinking: &ThinkingConfig) -> Document {
     Document::Object(root)
 }
 
+/// 本次请求要塞进 additionalModelRequestFields 的内容，`None` 表示什么都不带。
+fn request_fields(req: ThinkingRequest, thinking: &ThinkingConfig) -> Option<Document> {
+    match req {
+        ThinkingRequest::Absent => None,
+        ThinkingRequest::Off => {
+            let mut thinking_obj = HashMap::new();
+            thinking_obj.insert("type".to_string(), Document::String("disabled".to_string()));
+            let mut root = HashMap::new();
+            root.insert("thinking".to_string(), Document::Object(thinking_obj));
+            Some(Document::Object(root))
+        }
+        ThinkingRequest::On(mode) => Some(thinking_fields(mode, thinking)),
+    }
+}
+
+/// 万一模型把 `<thinking>…</thinking>` 漏进正文块，这段字会被直接粘进用户的文档。
+/// 只剥完整成对的标签，配不上就原样留着，避免把正常文本吃掉。
+fn strip_thinking_tags(text: &str) -> String {
+    const OPEN: &str = "<thinking>";
+    const CLOSE: &str = "</thinking>";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        // to_ascii_lowercase 不改变 UTF-8 字节长度，字节下标对 rest 仍然有效。
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find(OPEN) else { break };
+        let Some(end) = lower[start..].find(CLOSE) else { break };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + end + CLOSE.len()..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 /// 本次调用的 max_tokens：预算模式必须大于 budget_tokens，自适应模式给思考留余量。
-fn max_tokens_for(mode: Option<ThinkingMode>, thinking: &ThinkingConfig, base: i32) -> i32 {
-    match mode {
-        None => base,
-        Some(ThinkingMode::Budget) => base + thinking_budget(thinking),
-        Some(ThinkingMode::Adaptive) => base + THINKING_HEADROOM,
+fn max_tokens_for(req: ThinkingRequest, thinking: &ThinkingConfig, base: i32) -> i32 {
+    match req {
+        ThinkingRequest::Absent | ThinkingRequest::Off => base,
+        ThinkingRequest::On(ThinkingMode::Budget) => base + thinking_budget(thinking),
+        ThinkingRequest::On(ThinkingMode::Adaptive) => base + THINKING_HEADROOM,
     }
 }
 
@@ -131,7 +197,7 @@ async fn send_once(
     system_prompt: &str,
     content: &[ContentBlock],
     thinking: &ThinkingConfig,
-    mode: Option<ThinkingMode>,
+    req: ThinkingRequest,
     base_max_tokens: i32,
 ) -> Result<(String, TokenUsage), String> {
     let message = Message::builder()
@@ -146,14 +212,14 @@ async fn send_once(
         .messages(message)
         .inference_config(
             InferenceConfiguration::builder()
-                .max_tokens(max_tokens_for(mode, thinking, base_max_tokens))
+                .max_tokens(max_tokens_for(req, thinking, base_max_tokens))
                 .build(),
         );
     if !system_prompt.is_empty() {
         request = request.system(SystemContentBlock::Text(system_prompt.to_string()));
     }
-    if let Some(mode) = mode {
-        request = request.additional_model_request_fields(thinking_fields(mode, thinking));
+    if let Some(fields) = request_fields(req, thinking) {
+        request = request.additional_model_request_fields(fields);
     }
 
     let response = request
@@ -172,9 +238,8 @@ async fn send_once(
                 .collect::<Vec<_>>()
                 .join("")
         })
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+        .unwrap_or_default();
+    let text = strip_thinking_tags(&text);
 
     let usage = response
         .usage()
@@ -200,51 +265,52 @@ async fn converse(
     let sdk = aws::sdk_config(&cfg.bedrock_profile, &cfg.bedrock_region).await?;
     let client = Client::new(&sdk);
 
-    if !thinking.enabled {
-        return send_once(
-            &client,
-            model,
-            system_prompt,
-            &content,
-            thinking,
-            None,
-            base_max_tokens,
+    // 猜错思考参数形式时服务端会明确报错，用 fallback 再试一次。
+    let (first, fallback) = if thinking.enabled {
+        let mode = preferred_thinking_mode(model);
+        (
+            ThinkingRequest::On(mode),
+            Some(ThinkingRequest::On(mode.other())),
         )
-        .await;
-    }
+    } else {
+        match thinking_off_request(model) {
+            // 显式关闭被拒（老模型 / 自定义模型不认这个字段）就退回什么都不发。
+            ThinkingRequest::Off => (ThinkingRequest::Off, Some(ThinkingRequest::Absent)),
+            other => (other, None),
+        }
+    };
 
-    let first = preferred_thinking_mode(model);
     match send_once(
         &client,
         model,
         system_prompt,
         &content,
         thinking,
-        Some(first),
+        first,
         base_max_tokens,
     )
     .await
     {
         Ok(result) => Ok(result),
-        Err(error) if suggests_other_thinking_mode(&error) => {
-            eprintln!(
-                "[Bedrock] {:?} thinking rejected for {}, retrying with {:?}",
-                first,
-                model,
-                first.other()
-            );
-            send_once(
-                &client,
-                model,
-                system_prompt,
-                &content,
-                thinking,
-                Some(first.other()),
-                base_max_tokens,
-            )
-            .await
-        }
-        Err(error) => Err(error),
+        Err(error) => match fallback {
+            Some(fallback) if suggests_other_thinking_mode(&error) => {
+                eprintln!(
+                    "[Bedrock] {:?} rejected for {}, retrying with {:?}",
+                    first, model, fallback
+                );
+                send_once(
+                    &client,
+                    model,
+                    system_prompt,
+                    &content,
+                    thinking,
+                    fallback,
+                    base_max_tokens,
+                )
+                .await
+            }
+            _ => Err(error),
+        },
     }
 }
 
@@ -267,6 +333,12 @@ pub async fn optimize(
     )
     .await?;
     if result.is_empty() {
+        // 正文为空基本只有一种成因：推理 token 把 max_tokens 占满了。
+        // 回退原文是对的（总比丢字好），但别再无声无息 —— 上一轮就是这样查了很久。
+        eprintln!(
+            "[Bedrock] {} returned no text (in={} out={}), falling back to raw transcript",
+            model, usage.prompt_tokens, usage.completion_tokens
+        );
         return Ok((text.to_string(), usage));
     }
     Ok((result, usage))
@@ -393,15 +465,76 @@ mod tests {
     #[test]
     fn max_tokens_leaves_room_for_thinking() {
         let t = thinking(true, "HIGH");
-        assert_eq!(max_tokens_for(None, &t, 8192), 8192);
+        assert_eq!(max_tokens_for(ThinkingRequest::Absent, &t, 8192), 8192);
+        assert_eq!(max_tokens_for(ThinkingRequest::Off, &t, 8192), 8192);
         assert_eq!(
-            max_tokens_for(Some(ThinkingMode::Budget), &t, 8192),
+            max_tokens_for(ThinkingRequest::On(ThinkingMode::Budget), &t, 8192),
             8192 + 16384
         );
         assert_eq!(
-            max_tokens_for(Some(ThinkingMode::Adaptive), &t, 8192),
+            max_tokens_for(ThinkingRequest::On(ThinkingMode::Adaptive), &t, 8192),
             8192 + THINKING_HEADROOM
         );
+    }
+
+    /// 听写慢的主因：关闭思考时对 Adaptive 代次必须显式发 disabled，
+    /// 否则服务端按默认的自适应思考跑。Budget 代次省略字段本来就不思考。
+    #[test]
+    fn disabling_thinking_is_explicit_only_for_adaptive_claude() {
+        assert_eq!(
+            thinking_off_request("global.anthropic.claude-sonnet-5"),
+            ThinkingRequest::Off
+        );
+        assert_eq!(
+            thinking_off_request("global.anthropic.claude-opus-5"),
+            ThinkingRequest::Off
+        );
+        assert_eq!(
+            thinking_off_request("global.anthropic.claude-haiku-4-5-20251001-v1:0"),
+            ThinkingRequest::Absent
+        );
+        assert_eq!(
+            thinking_off_request("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            ThinkingRequest::Absent
+        );
+        // thinking 是 Claude 专有字段，别发给 Nova / Llama 之类的自定义模型。
+        assert_eq!(thinking_off_request("amazon.nova-pro-v1:0"), ThinkingRequest::Absent);
+        assert_eq!(
+            thinking_off_request("meta.llama3-3-70b-instruct-v1:0"),
+            ThinkingRequest::Absent
+        );
+    }
+
+    #[test]
+    fn off_request_sends_thinking_disabled() {
+        let t = thinking(false, "LOW");
+        let doc = request_fields(ThinkingRequest::Off, &t).expect("off must send fields");
+        let root = object(&doc);
+        assert_eq!(
+            object(root.get("thinking").unwrap()).get("type"),
+            Some(&Document::String("disabled".to_string()))
+        );
+        // disabled 时不该带 output_config，也不该带 budget_tokens
+        assert!(root.get("output_config").is_none());
+        assert!(object(root.get("thinking").unwrap())
+            .get("budget_tokens")
+            .is_none());
+        assert!(request_fields(ThinkingRequest::Absent, &t).is_none());
+    }
+
+    #[test]
+    fn strips_only_paired_thinking_tags() {
+        assert_eq!(
+            strip_thinking_tags("<thinking>先想一下</thinking>这是正文"),
+            "这是正文"
+        );
+        assert_eq!(
+            strip_thinking_tags("前<thinking>a</thinking>中<THINKING>b</THINKING>后"),
+            "前中后"
+        );
+        // 配不上的标签原样留着，别把正常文本吃掉
+        assert_eq!(strip_thinking_tags("正文 <thinking> 没闭合"), "正文 <thinking> 没闭合");
+        assert_eq!(strip_thinking_tags("普通中文，没有标签"), "普通中文，没有标签");
     }
 
     #[test]
