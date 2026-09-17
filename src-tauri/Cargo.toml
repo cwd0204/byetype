@@ -38,10 +38,21 @@ tokio-util = "0.7"
 s3 = { version = "0.1", default-features = false, features = ["async", "rustls"] }
 zip = "2.0"
 chrono = "0.4"
+# AWS：Bedrock（Claude 文本/视觉）与 Amazon Transcribe（流式语音转写），走 SDK 默认凭证链（profile / ADA credential_process / SSO）
+aws-config = { version = "1.12", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = "1.143"
+aws-sdk-transcribestreaming = "1.116"
+aws-smithy-types = "1"
+futures-util = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"
 objc = "0.2"
+# 会议记录的系统音频采集：Core Audio 进程 tap（聚合设备 + IOProc 走 coreaudio-sys，
+# 14.2+ 的 AudioHardwareCreateProcessTap 用 dlsym 弱解析，CATapDescription 走 objc）
+coreaudio-sys = "0.2"
+core-foundation = "0.10"
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [

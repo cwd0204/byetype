@@ -32,6 +32,17 @@
         "minHeight": 560,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "meeting",
+        "title": "会议记录",
+        "url": "meeting.html",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 520,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {

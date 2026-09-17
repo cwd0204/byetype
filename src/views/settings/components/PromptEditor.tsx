@@ -39,6 +39,10 @@ function getConfigValue(config: AppConfig, configPath: string): string {
     return template?.prompt ?? ''
   }
   if (configPath === 'extract.prompt') return config.extract.prompt
+  if (configPath.startsWith('meeting.prompts.')) {
+    const key = configPath.split('.')[2] as keyof AppConfig['meeting']['prompts']
+    return config.meeting.prompts[key] ?? ''
+  }
   const key = configPath.split('.').pop() as keyof AppConfig['transcribe']['prompts']
   return config.transcribe.prompts[key]
 }
@@ -70,6 +74,13 @@ function setConfigValue(config: AppConfig, configPath: string, value: string): A
   }
   if (configPath === 'extract.prompt') {
     return { ...config, extract: { ...config.extract, prompt: value } }
+  }
+  if (configPath.startsWith('meeting.prompts.')) {
+    const key = configPath.split('.')[2] as keyof AppConfig['meeting']['prompts']
+    return {
+      ...config,
+      meeting: { ...config.meeting, prompts: { ...config.meeting.prompts, [key]: value } },
+    }
   }
   const key = configPath.split('.').pop() as keyof AppConfig['transcribe']['prompts']
   return {

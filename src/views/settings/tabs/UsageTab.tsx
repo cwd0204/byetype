@@ -8,6 +8,8 @@ const SCENES: { id: UsageScene; label: string; color: string }[] = [
   { id: 'extract', label: '识别', color: '#ff9500' },
   { id: 'optimize', label: '优化', color: '#34c759' },
   { id: 'learn', label: '学习', color: '#af52de' },
+  { id: 'meeting-transcribe', label: '会议转写', color: '#ff2d55' },
+  { id: 'meeting-summary', label: '会议纪要', color: '#5ac8fa' },
 ]
 
 const TIMING_COLORS = { transcribe: '#007aff', optimize: '#34c759' }

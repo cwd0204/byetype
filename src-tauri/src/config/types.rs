@@ -17,6 +17,110 @@ pub struct AppConfig {
     pub advanced: AdvancedConfig,
     #[serde(default)]
     pub backup: BackupConfig,
+    #[serde(default)]
+    pub meeting: MeetingConfig,
+}
+
+/// 会议记录：检测 Zoom 会议 → 采集麦克风 + 系统音频 → 分段转写 → 会议纪要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingConfig {
+    /// 总开关；关闭时不探测、托盘手动开始仍可用
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_detect: bool,
+    #[serde(default = "default_true")]
+    pub capture_system_audio: bool,
+    #[serde(default = "default_true")]
+    pub capture_microphone: bool,
+    /// 空 = 跟随「转写设置」里的转写模型
+    #[serde(default)]
+    pub transcribe_model_id: String,
+    #[serde(default = "default_meeting_summary_model")]
+    pub summary_model_id: String,
+    #[serde(default)]
+    pub summary_thinking: ThinkingConfig,
+    /// 每段音频目标时长（秒），到点后在静音处切
+    #[serde(default = "default_chunk_seconds")]
+    pub chunk_seconds: u32,
+    #[serde(default = "default_chunk_timeout")]
+    pub chunk_timeout_secs: u32,
+    #[serde(default = "default_summary_timeout")]
+    pub summary_timeout_secs: u32,
+    #[serde(default = "default_max_meeting_minutes")]
+    pub max_meeting_minutes: u32,
+    #[serde(default = "default_detect_poll")]
+    pub detect_poll_secs: u32,
+    /// 纪要导出目录；空 = <app_data>/meetings-notes
+    #[serde(default)]
+    pub notes_folder: String,
+    #[serde(default)]
+    pub keep_audio: bool,
+    #[serde(default = "default_true")]
+    pub show_window_on_start: bool,
+    #[serde(default = "default_true")]
+    pub open_summary_when_done: bool,
+    #[serde(default)]
+    pub prompts: MeetingPromptsConfig,
+}
+
+/// 自定义提示词路径；空 = 内置模板
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingPromptsConfig {
+    #[serde(default)]
+    pub transcribe: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+fn default_meeting_summary_model() -> String {
+    "builtin-bedrock-claude-sonnet-5".to_string()
+}
+
+fn default_chunk_seconds() -> u32 {
+    240
+}
+
+fn default_chunk_timeout() -> u32 {
+    120
+}
+
+fn default_summary_timeout() -> u32 {
+    180
+}
+
+fn default_max_meeting_minutes() -> u32 {
+    240
+}
+
+fn default_detect_poll() -> u32 {
+    3
+}
+
+impl Default for MeetingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_detect: true,
+            capture_system_audio: true,
+            capture_microphone: true,
+            transcribe_model_id: String::new(),
+            summary_model_id: default_meeting_summary_model(),
+            summary_thinking: ThinkingConfig::default(),
+            chunk_seconds: default_chunk_seconds(),
+            chunk_timeout_secs: default_chunk_timeout(),
+            summary_timeout_secs: default_summary_timeout(),
+            max_meeting_minutes: default_max_meeting_minutes(),
+            detect_poll_secs: default_detect_poll(),
+            notes_folder: String::new(),
+            keep_audio: false,
+            show_window_on_start: true,
+            open_summary_when_done: true,
+            prompts: MeetingPromptsConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +146,19 @@ impl AppConfig {
         }
         if self.models.custom.iter().any(|model| !model.chat_template_kwargs.is_object()) {
             return Err("chat_template_kwargs 必须是 JSON 对象".to_string());
+        }
+        let meeting = &self.meeting;
+        if !(60..=600).contains(&meeting.chunk_seconds) {
+            return Err("会议分段时长必须在 60 到 600 秒之间".to_string());
+        }
+        if !(1..=30).contains(&meeting.detect_poll_secs) {
+            return Err("Zoom 探测间隔必须在 1 到 30 秒之间".to_string());
+        }
+        if !(10..=600).contains(&meeting.max_meeting_minutes) {
+            return Err("会议最长时长必须在 10 到 600 分钟之间".to_string());
+        }
+        if meeting.chunk_timeout_secs < 30 || meeting.summary_timeout_secs < 30 {
+            return Err("会议转写 / 纪要超时不能少于 30 秒".to_string());
         }
         Ok(())
     }
@@ -127,6 +244,8 @@ pub struct ModelsConfig {
     pub builtin_api_keys: BuiltinApiKeys,
     #[serde(default)]
     pub custom: Vec<CustomModelEntry>,
+    #[serde(default)]
+    pub aws: AwsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +260,49 @@ pub struct BuiltinApiKeys {
     pub openrouter: String,
     #[serde(default)]
     pub mimo: String,
+}
+
+/// AWS 接入：只存 profile 名与 region，凭证由本机 ~/.aws/config 的凭证链提供
+/// （ADA credential_process、静态 key、SSO 都行），app 不接触任何密钥。
+/// Bedrock 与 Transcribe 分开配，因为同一个角色可能只授权其中一个服务。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwsConfig {
+    #[serde(default = "default_aws_profile")]
+    pub bedrock_profile: String,
+    #[serde(default = "default_aws_region")]
+    pub bedrock_region: String,
+    #[serde(default = "default_aws_profile")]
+    pub transcribe_profile: String,
+    #[serde(default = "default_aws_region")]
+    pub transcribe_region: String,
+    /// "auto" = zh-CN + en-US 多语言识别（首选 zh-CN）；否则为单一语言码，如 "zh-CN" / "en-US"
+    #[serde(default = "default_transcribe_language")]
+    pub transcribe_language: String,
+}
+
+fn default_aws_profile() -> String {
+    "default".to_string()
+}
+
+fn default_aws_region() -> String {
+    "us-east-1".to_string()
+}
+
+fn default_transcribe_language() -> String {
+    "auto".to_string()
+}
+
+impl Default for AwsConfig {
+    fn default() -> Self {
+        Self {
+            bedrock_profile: default_aws_profile(),
+            bedrock_region: default_aws_region(),
+            transcribe_profile: default_aws_profile(),
+            transcribe_region: default_aws_region(),
+            transcribe_language: default_transcribe_language(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +530,7 @@ impl Default for AppConfig {
                     mimo: String::new(),
                 },
                 custom: Vec::new(),
+                aws: AwsConfig::default(),
             },
             transcribe: TranscribeConfig {
                 model_id: "builtin-gemini-3.8-flash".to_string(),
@@ -402,7 +565,41 @@ impl Default for AppConfig {
                 proxy_url: String::new(),
             },
             backup: BackupConfig::default(),
+            meeting: MeetingConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod meeting_tests {
+    use super::*;
+
+    #[test]
+    fn existing_config_without_meeting_uses_defaults() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("meeting");
+
+        let config: AppConfig = serde_json::from_value(value).unwrap();
+
+        assert!(!config.meeting.enabled);
+        assert!(config.meeting.auto_detect);
+        assert_eq!(config.meeting.chunk_seconds, 240);
+        assert_eq!(config.meeting.summary_model_id, "builtin-bedrock-claude-sonnet-5");
+        assert!(config.meeting.transcribe_model_id.is_empty());
+    }
+
+    #[test]
+    fn meeting_validation_rejects_out_of_range_values() {
+        let mut config = AppConfig::default();
+        config.meeting.chunk_seconds = 10;
+        assert!(config.validate().is_err());
+
+        let mut config = AppConfig::default();
+        config.meeting.detect_poll_secs = 0;
+        assert!(config.validate().is_err());
+
+        let config = AppConfig::default();
+        assert!(config.validate().is_ok());
     }
 }
 
@@ -439,6 +636,31 @@ mod local_api_tests {
 
         assert!(!config.local_api.enabled);
         assert_eq!(config.local_api.port, 8765);
+    }
+
+    #[test]
+    fn existing_config_without_aws_uses_defaults() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value["models"].as_object_mut().unwrap().remove("aws");
+
+        let config: AppConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(config.models.aws.bedrock_profile, "default");
+        assert_eq!(config.models.aws.bedrock_region, "us-east-1");
+        assert_eq!(config.models.aws.transcribe_profile, "default");
+        assert_eq!(config.models.aws.transcribe_language, "auto");
+    }
+
+    #[test]
+    fn partial_aws_config_fills_missing_fields() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value["models"]["aws"] = serde_json::json!({ "bedrockProfile": "bedrock", "bedrockRegion": "ap-northeast-1" });
+
+        let config: AppConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(config.models.aws.bedrock_profile, "bedrock");
+        assert_eq!(config.models.aws.bedrock_region, "ap-northeast-1");
+        assert_eq!(config.models.aws.transcribe_region, "us-east-1");
     }
 
     #[test]

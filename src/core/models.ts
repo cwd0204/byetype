@@ -1,10 +1,17 @@
 import type { AppConfig } from './types'
 
+export type ModelProtocol = 'gemini' | 'openai-compat' | 'qwen-omni' | 'mimo' | 'bedrock' | 'aws-transcribe'
+
+/** AWS 协议不用 API Key，凭证来自本机 AWS profile（设置 → 模型管理 → Amazon Bedrock / Transcribe 卡） */
+export function isAwsProtocol(protocol: ModelProtocol): boolean {
+  return protocol === 'bedrock' || protocol === 'aws-transcribe'
+}
+
 export interface ModelEntry {
   id: string
   provider: string
   model: string
-  protocol: 'gemini' | 'openai-compat' | 'qwen-omni' | 'mimo'
+  protocol: ModelProtocol
   baseUrl: string
   apiKey: string
   builtin: boolean
@@ -90,6 +97,52 @@ export const BUILTIN_MODELS: Omit<ModelEntry, 'apiKey'>[] = [
     supportsAudio: false,
     supportsText: true,
     supportsVision: true,
+  },
+  // Amazon Bedrock 上的 Claude（global.* 跨区推理配置）：文本 + 图像，不收音频
+  {
+    id: 'builtin-bedrock-claude-sonnet-5',
+    provider: 'Amazon Bedrock',
+    model: 'global.anthropic.claude-sonnet-5',
+    protocol: 'bedrock',
+    baseUrl: '',
+    builtin: true,
+    supportsAudio: false,
+    supportsText: true,
+    supportsVision: true,
+  },
+  {
+    id: 'builtin-bedrock-claude-opus-5',
+    provider: 'Amazon Bedrock',
+    model: 'global.anthropic.claude-opus-5',
+    protocol: 'bedrock',
+    baseUrl: '',
+    builtin: true,
+    supportsAudio: false,
+    supportsText: true,
+    supportsVision: true,
+  },
+  {
+    id: 'builtin-bedrock-claude-haiku-4-5',
+    provider: 'Amazon Bedrock',
+    model: 'global.anthropic.claude-haiku-4-5-20251001-v1:0',
+    protocol: 'bedrock',
+    baseUrl: '',
+    builtin: true,
+    supportsAudio: false,
+    supportsText: true,
+    supportsVision: true,
+  },
+  // Amazon Transcribe 流式转写：只做语音，专有词纠错由文本优化阶段完成
+  {
+    id: 'builtin-aws-transcribe',
+    provider: 'Amazon Transcribe',
+    model: 'streaming',
+    protocol: 'aws-transcribe',
+    baseUrl: '',
+    builtin: true,
+    supportsAudio: true,
+    supportsText: false,
+    supportsVision: false,
   },
 ]
 

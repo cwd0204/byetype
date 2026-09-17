@@ -46,7 +46,7 @@ export interface CustomModelEntry {
   id: string
   provider: string
   model: string
-  protocol: 'gemini' | 'openai-compat' | 'qwen-omni' | 'mimo'
+  protocol: 'gemini' | 'openai-compat' | 'qwen-omni' | 'mimo' | 'bedrock' | 'aws-transcribe'
   baseUrl: string
   apiKey: string
   audioInputMode: 'input_audio' | 'audio_url'
@@ -64,9 +64,24 @@ export interface BuiltinApiKeys {
   mimo: string
 }
 
+/**
+ * AWS 接入配置。只存 profile 名与 region，凭证由本机 ~/.aws/config 的凭证链提供
+ * （ADA credential_process、静态 key、SSO 都行）。Bedrock 与 Transcribe 分开配，
+ * 因为同一个角色可能只授权其中一个服务。
+ */
+export interface AwsConfig {
+  bedrockProfile: string
+  bedrockRegion: string
+  transcribeProfile: string
+  transcribeRegion: string
+  /** 'auto' = zh-CN + en-US 多语言识别（首选 zh-CN）；否则填单一语言码，如 'zh-CN' / 'en-US' */
+  transcribeLanguage: string
+}
+
 export interface ModelsConfig {
   builtinApiKeys: BuiltinApiKeys
   custom: CustomModelEntry[]
+  aws: AwsConfig
 }
 
 export interface TranscribeConfig {
@@ -132,6 +147,35 @@ export interface BackupEntry {
   lastModified: string
 }
 
+export interface MeetingPromptsConfig {
+  /** 自定义提示词路径，空 = 内置模板 */
+  transcribe: string
+  summary: string
+}
+
+/** 会议记录：检测 Zoom 会议 → 采集麦克风 + 系统音频 → 分段转写 → 纪要 */
+export interface MeetingConfig {
+  enabled: boolean
+  autoDetect: boolean
+  captureSystemAudio: boolean
+  captureMicrophone: boolean
+  /** 空 = 跟随「转写设置」的转写模型 */
+  transcribeModelId: string
+  summaryModelId: string
+  summaryThinking: ThinkingConfig
+  chunkSeconds: number
+  chunkTimeoutSecs: number
+  summaryTimeoutSecs: number
+  maxMeetingMinutes: number
+  detectPollSecs: number
+  /** 纪要导出目录，空 = 应用数据目录下的 meetings-notes */
+  notesFolder: string
+  keepAudio: boolean
+  showWindowOnStart: boolean
+  openSummaryWhenDone: boolean
+  prompts: MeetingPromptsConfig
+}
+
 export interface AppConfig {
   general: GeneralConfig
   localApi: LocalApiConfig
@@ -142,6 +186,65 @@ export interface AppConfig {
   extract: ExtractConfig
   advanced: AdvancedConfig
   backup: BackupConfig
+  meeting: MeetingConfig
+}
+
+export type MeetingPhase = 'idle' | 'recording' | 'finalizing'
+
+export interface MeetingStatus {
+  phase: MeetingPhase
+  meetingId: string | null
+  startedAt: string | null
+  elapsedSecs: number
+  source: 'auto' | 'manual' | null
+  chunksDone: number
+  chunksPending: number
+  microphone: boolean
+  systemAudio: boolean
+  warnings: string[]
+  lastError: string | null
+  lastMeetingId: string | null
+}
+
+export type MeetingRecordStatus = 'recording' | 'finalizing' | 'done' | 'summary_failed' | 'failed' | 'interrupted'
+
+export interface MeetingMeta {
+  id: string
+  title: string
+  startedAt: string
+  endedAt: string | null
+  durationSecs: number
+  source: string
+  status: MeetingRecordStatus
+  chunkCount: number
+  failedChunks: number
+  transcribeModel: string
+  summaryModel: string
+  notesPath: string | null
+  error: string | null
+  microphone: boolean
+  systemAudio: boolean
+}
+
+export interface TranscriptSegment {
+  index: number
+  startSecs: number
+  endSecs: number
+  text: string
+  failed: boolean
+}
+
+export interface MeetingDetail {
+  meta: MeetingMeta
+  transcript: string
+  summary: string | null
+  segments: TranscriptSegment[]
+}
+
+export interface MeetingSupport {
+  systemAudioSupported: boolean
+  reason: string | null
+  platform: string
 }
 
 export type TaskStatus = 'recording' | 'transcribing' | 'optimizing' | 'retrying' | 'extracting' | 'completed' | 'failed' | 'cancelled'
@@ -164,7 +267,7 @@ export interface RetryStatusUpdate {
   status: 'transcribing' | 'optimizing' | 'retrying' | 'cancelled' | 'completed' | 'failed'
 }
 
-export type UsageScene = 'transcribe' | 'extract' | 'optimize' | 'learn'
+export type UsageScene = 'transcribe' | 'extract' | 'optimize' | 'learn' | 'meeting-transcribe' | 'meeting-summary'
 
 export interface UsageRecord {
   /** 毫秒时间戳 */

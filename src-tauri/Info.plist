@@ -4,6 +4,8 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>ByeType needs microphone access to record voice input for transcription.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>ByeType 需要录制系统音频，以便在会议记录中转写其他参会者的发言。</string>
     <key>LSUIElement</key>
     <true/>
 </dict>

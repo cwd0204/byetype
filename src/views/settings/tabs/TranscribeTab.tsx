@@ -20,6 +20,10 @@ export function TranscribeTab({ config, onSave }: Props) {
     m?.protocol === 'openai-compat' && (m?.baseUrl?.includes('openrouter.ai') ?? false)
   const isTranscribeGemini = transcribeModel?.protocol === 'gemini' || isOpenRouter(transcribeModel)
   const isVoiceTemplatesGemini = voiceTemplatesModel?.protocol === 'gemini' || isOpenRouter(voiceTemplatesModel)
+  // Amazon Transcribe 是纯 ASR，吃不到提示词：规则增强在优化阶段强制开启
+  const isTranscribeAws = transcribeModel?.protocol === 'aws-transcribe'
+  // Bedrock 上的 Claude 走扩展思考：LOW / MEDIUM / HIGH 映射为不同思考预算
+  const isVoiceTemplatesBedrock = voiceTemplatesModel?.protocol === 'bedrock'
   // Gemini 3.7 系列不支持 MINIMAL 思考档位，隐藏该选项并按 LOW 显示
   const transcribeSupportsMinimal = supportsMinimalThinking(transcribeModel?.model)
   const voiceTemplatesSupportsMinimal = supportsMinimalThinking(voiceTemplatesModel?.model)
@@ -119,9 +123,9 @@ export function TranscribeTab({ config, onSave }: Props) {
             )}
           </select>
         </SettingRow>
-        {isVoiceTemplatesGemini && (
+        {(isVoiceTemplatesGemini || isVoiceTemplatesBedrock) && (
           <>
-            <SettingRow label="启用思考" description="让模型在处理前先进行推理">
+            <SettingRow label="启用思考" description={isVoiceTemplatesBedrock ? 'Claude 扩展思考，会增加延迟与用量' : '让模型在处理前先进行推理'}>
               <Toggle
                 checked={voiceTemplates.thinking.enabled}
                 onChange={checked => updateVoiceTemplatesThinking({ enabled: checked })}
@@ -131,11 +135,11 @@ export function TranscribeTab({ config, onSave }: Props) {
               <SettingRow label="Thinking Level" description="思考深度级别">
                 <select
                   className="select"
-                  value={voiceTemplatesSupportsMinimal || voiceTemplates.thinking.level !== 'MINIMAL' ? voiceTemplates.thinking.level : 'LOW'}
+                  value={(voiceTemplatesSupportsMinimal && !isVoiceTemplatesBedrock) || voiceTemplates.thinking.level !== 'MINIMAL' ? voiceTemplates.thinking.level : 'LOW'}
                   onChange={e => updateVoiceTemplatesThinking({ level: e.target.value as ThinkingConfig['level'] })}
                   style={{ width: 120 }}
                 >
-                  {voiceTemplatesSupportsMinimal && <option value="MINIMAL">MINIMAL</option>}
+                  {voiceTemplatesSupportsMinimal && !isVoiceTemplatesBedrock && <option value="MINIMAL">MINIMAL</option>}
                   <option value="LOW">LOW</option>
                   <option value="MEDIUM">MEDIUM</option>
                   <option value="HIGH">HIGH</option>
@@ -174,9 +178,15 @@ export function TranscribeTab({ config, onSave }: Props) {
       <h3 className="section-title">其他</h3>
 
       <SettingGroup>
-        <SettingRow label="规则增强" description="文本优化时再次注入所有音频转写规则，适合音频转写能力较弱的模型">
+        <SettingRow
+          label="规则增强"
+          description={isTranscribeAws
+            ? 'Amazon Transcribe 没有提示词能力，转写规则、专有词汇和学习结果会始终在文本优化阶段注入（此开关无需手动打开）'
+            : '文本优化时再次注入所有音频转写规则，适合音频转写能力较弱的模型'}
+        >
           <Toggle
-            checked={voiceTemplates.reuseTranscribeReferences ?? false}
+            checked={isTranscribeAws || (voiceTemplates.reuseTranscribeReferences ?? false)}
+            disabled={isTranscribeAws}
             onChange={checked => updateVoiceTemplates({ reuseTranscribeReferences: checked })}
           />
         </SettingRow>

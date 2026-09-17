@@ -39,3 +39,4 @@ generate_icons.py
 DESIGN-*.md
 src-tauri/gen/schemas/
 .superpowers/
+CLAUDE.md

@@ -12,6 +12,7 @@ mod updater;
 mod backup;
 mod local_api;
 mod learning;
+mod meeting;
 mod usage;
 mod timing;
 #[cfg(target_os = "windows")]
@@ -74,6 +75,22 @@ pub fn run() {
             commands::restore_from_s3,
             commands::backup_to_local,
             commands::restore_from_local,
+            meeting::commands::meeting_get_status,
+            meeting::commands::meeting_start,
+            meeting::commands::meeting_stop,
+            meeting::commands::meeting_discard,
+            meeting::commands::meeting_list,
+            meeting::commands::meeting_get,
+            meeting::commands::meeting_delete,
+            meeting::commands::meeting_save_summary,
+            meeting::commands::meeting_regenerate_summary,
+            meeting::commands::meeting_pick_notes_folder,
+            meeting::commands::meeting_notes_folder,
+            meeting::commands::meeting_reveal,
+            meeting::commands::meeting_check_support,
+            meeting::commands::meeting_request_permissions,
+            meeting::commands::meeting_open_window,
+            meeting::commands::meeting_close_window,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -105,6 +122,10 @@ pub fn run() {
             app.manage::<ScreenshotImageState>(Arc::new(Mutex::new(None)));
             app.manage(updater::UpdateState::new(None));
 
+            // 会议记录：状态机 + Zoom 探测轮询
+            app.manage(meeting::MeetingManager::new(&app_handle, &data_dir));
+            meeting::detector::spawn(app_handle.clone());
+
             let local_api_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 let config = local_api_handle.state::<ConfigManager>().get();
@@ -130,6 +151,9 @@ pub fn run() {
             if let Some(win) = app.get_webview_window("learning") {
                 let _ = win.hide();
             }
+            if let Some(win) = app.get_webview_window("meeting") {
+                let _ = win.hide();
+            }
 
             // Auto-check for updates after a short delay
             let update_handle = app_handle.clone();
@@ -142,7 +166,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             // Intercept settings window close: hide instead of destroy
-            if window.label() == "settings" || window.label() == "learning" {
+            if window.label() == "settings" || window.label() == "learning" || window.label() == "meeting" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();

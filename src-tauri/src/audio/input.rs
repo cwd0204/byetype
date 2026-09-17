@@ -24,6 +24,20 @@ pub fn normalize_audio(
     max_duration_seconds: u32,
     cancellation: &CancellationToken,
 ) -> Result<NormalizedAudio, String> {
+    let pcm = decode_to_pcm16(bytes, content_type, max_duration_seconds, cancellation)?;
+    Ok(NormalizedAudio {
+        flac: encoder::encode_flac_with_cancel(&pcm, cancellation.clone())?,
+    })
+}
+
+/// 把任意支持的音频（FLAC / MP3 / M4A / WAV）解码成 16 kHz 单声道 i16 PCM。
+/// Amazon Transcribe 的多语言识别只接受 PCM，所以它也走这里把内部 FLAC 解回来。
+pub fn decode_to_pcm16(
+    bytes: Vec<u8>,
+    content_type: &str,
+    max_duration_seconds: u32,
+    cancellation: &CancellationToken,
+) -> Result<Vec<i16>, String> {
     let extension = validate_content_type(content_type)?;
     if bytes.is_empty() {
         return Err("音频内容为空".to_string());
@@ -110,9 +124,7 @@ pub fn normalize_audio(
         );
     }
 
-    Ok(NormalizedAudio {
-        flac: encoder::encode_flac_with_cancel(&pcm, cancellation.clone())?,
-    })
+    Ok(pcm)
 }
 
 fn mix_to_mono_with_cancel(

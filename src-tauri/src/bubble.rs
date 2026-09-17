@@ -54,13 +54,51 @@ fn label_for(task_id: u32) -> String {
     format!("bubble-{}", slot)
 }
 
+/// 会议记录专用气泡：独立窗口与代次，不占听写的 3 个槽位。
+pub const MEETING_LABEL: &str = "bubble-meeting";
+static MEETING_GEN: AtomicU32 = AtomicU32::new(0);
+
 /// Pre-create a pool of hidden bubble windows at startup.
 pub fn init(app: &AppHandle) -> Result<(), String> {
     for i in 1..=MAX_BUBBLES {
         let label = label_for(i);
         create_window(app, &label)?;
     }
+    create_window(app, MEETING_LABEL)?;
     Ok(())
+}
+
+/// 显示会议气泡；`auto_hide_ms` 给定时到点自动隐藏（期间再次 show 会取消这次隐藏）。
+pub fn show_meeting(app: &AppHandle, status: &str, auto_hide_ms: Option<u64>) -> Result<(), String> {
+    let generation = MEETING_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    show_status(app, MEETING_LABEL, 0, status)?;
+    if let Some(ms) = auto_hide_ms {
+        let app_handle = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            if MEETING_GEN.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            hide_window(&app_handle, MEETING_LABEL);
+        });
+    }
+    Ok(())
+}
+
+pub fn hide_meeting(app: &AppHandle) {
+    MEETING_GEN.fetch_add(1, Ordering::SeqCst);
+    hide_window(app, MEETING_LABEL);
+}
+
+fn hide_window(app: &AppHandle, label: &str) {
+    if let Some(win) = app.get_webview_window(label) {
+        // Clear content so next show won't flash stale state
+        let _ = app.emit_to(label, "clear-bubble", serde_json::json!({}));
+        let _ = win.hide();
+        let _ = win.set_position(tauri::Position::Logical(
+            tauri::LogicalPosition::new(-200.0, -200.0),
+        ));
+    }
 }
 
 fn create_window(app: &AppHandle, label: &str) -> Result<(), String> {
@@ -91,10 +129,10 @@ pub fn show(app: &AppHandle, task_id: u32) -> Result<(), String> {
     let idx = gen_index(task_id);
     SHOW_GEN[idx].fetch_add(1, Ordering::SeqCst);
 
-    show_status(app, &label, task_id)
+    show_status(app, &label, task_id, "preparing")
 }
 
-fn show_status(app: &AppHandle, label: &str, task_id: u32) -> Result<(), String> {
+fn show_status(app: &AppHandle, label: &str, task_id: u32, status: &str) -> Result<(), String> {
     let (cx, cy) = cursor_position();
 
     if let Some(win) = app.get_webview_window(label) {
@@ -129,7 +167,7 @@ fn show_status(app: &AppHandle, label: &str, task_id: u32) -> Result<(), String>
         let _ = app.emit_to(
             label,
             "show-bubble",
-            serde_json::json!({ "taskNumber": task_id, "status": "preparing" }),
+            serde_json::json!({ "taskNumber": task_id, "status": status }),
         );
     } else {
         eprintln!("[Bubble] Window {} not found in pool", label);
@@ -259,14 +297,7 @@ pub fn hide(app: &AppHandle, task_id: u32, delay_ms: u64) -> Result<(), String> 
             return;
         }
 
-        if let Some(win) = app_handle.get_webview_window(&label) {
-            // Clear content so next show won't flash stale state
-            let _ = app_handle.emit_to(&label, "clear-bubble", serde_json::json!({}));
-            let _ = win.hide();
-            let _ = win.set_position(tauri::Position::Logical(
-                tauri::LogicalPosition::new(-200.0, -200.0),
-            ));
-        }
+        hide_window(&app_handle, &label);
     });
     Ok(())
 }

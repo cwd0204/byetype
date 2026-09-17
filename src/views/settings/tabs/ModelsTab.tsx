@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { AppConfig, CustomModelEntry } from '../../../core/types'
+import type { AppConfig, AwsConfig, CustomModelEntry } from '../../../core/types'
 import { BUILTIN_MODELS, getAllModels } from '../../../core/models'
 import { testModelConnectivity, type ConnectivityResult } from '../../../lib/tauri-api'
 
@@ -61,6 +61,46 @@ export function ModelsTab({ config, onSave }: Props) {
     onSave({ ...config, models: { ...config.models, builtinApiKeys: { ...config.models.builtinApiKeys, [key]: value } } })
   }
 
+  const aws = config.models.aws
+  const updateAws = (changes: Partial<AwsConfig>) => {
+    onSave({ ...config, models: { ...config.models, aws: { ...aws, ...changes } } })
+  }
+
+  /** AWS 卡片：不用 API Key，填 profile + region，凭证由本机 ~/.aws/config 的凭证链提供 */
+  const renderAwsFields = (kind: 'bedrock' | 'transcribe') => {
+    const profile = kind === 'bedrock' ? aws.bedrockProfile : aws.transcribeProfile
+    const region = kind === 'bedrock' ? aws.bedrockRegion : aws.transcribeRegion
+    const setProfile = (value: string) => updateAws(kind === 'bedrock' ? { bedrockProfile: value } : { transcribeProfile: value })
+    const setRegion = (value: string) => updateAws(kind === 'bedrock' ? { bedrockRegion: value } : { transcribeRegion: value })
+    return (
+      <>
+        <div className="model-card-row">
+          <label>AWS Profile</label>
+          <input className="input" value={profile} onChange={e => setProfile(e.target.value)} placeholder="default" style={{ maxWidth: 240 }} spellCheck={false} />
+        </div>
+        <div className="model-card-row">
+          <label>Region</label>
+          <input className="input" value={region} onChange={e => setRegion(e.target.value)} placeholder="us-east-1" style={{ maxWidth: 240 }} spellCheck={false} />
+        </div>
+        {kind === 'transcribe' && (
+          <div className="model-card-row">
+            <label>识别语言</label>
+            <select className="input" value={aws.transcribeLanguage} onChange={e => updateAws({ transcribeLanguage: e.target.value })} style={{ maxWidth: 240 }}>
+              <option value="auto">自动（中文 + 英文混合）</option>
+              <option value="zh-CN">中文 zh-CN</option>
+              <option value="en-US">英文 en-US</option>
+              <option value="ja-JP">日语 ja-JP</option>
+            </select>
+          </div>
+        )}
+        <div className="model-card-subtitle">
+          凭证来自 ~/.aws/config 中的 profile（ADA credential_process、静态 key、SSO 均可），Midway 过期时先在终端运行 mwinit -o。AWS 请求不经过 app 的 HTTP 代理设置。
+          {kind === 'transcribe' && ' Transcribe 没有提示词能力，专有词纠错在文本优化阶段完成；长音频建议把「通用设置」里的转写超时调到 60 秒以上。'}
+        </div>
+      </>
+    )
+  }
+
   const testModel = async (modelId: string) => {
     setTestResults(prev => ({ ...prev, [modelId]: { loading: true } }))
     try {
@@ -118,11 +158,15 @@ export function ModelsTab({ config, onSave }: Props) {
   const geminiKey = config.models.builtinApiKeys.gemini
   const deepseekKey = config.models.builtinApiKeys.deepseek
 
-  const builtinByProvider = BUILTIN_MODELS.reduce<Record<string, { keyField: 'gemini' | 'deepseek' | 'dashscope' | 'openrouter' | 'mimo'; placeholder: string; models: typeof BUILTIN_MODELS }>>((acc, m) => {
+  type KeyField = 'gemini' | 'deepseek' | 'dashscope' | 'openrouter' | 'mimo'
+  type ProviderGroup = { keyField: KeyField | null; aws: 'bedrock' | 'transcribe' | null; placeholder: string; models: typeof BUILTIN_MODELS }
+  const builtinByProvider = BUILTIN_MODELS.reduce<Record<string, ProviderGroup>>((acc, m) => {
     if (!acc[m.provider]) {
-      const keyField = m.provider === 'OpenRouter' ? 'openrouter' : m.protocol === 'gemini' ? 'gemini' : m.protocol === 'qwen-omni' ? 'dashscope' : m.protocol === 'mimo' ? 'mimo' : 'deepseek'
+      const awsKind = m.protocol === 'bedrock' ? 'bedrock' : m.protocol === 'aws-transcribe' ? 'transcribe' : null
+      const keyField: KeyField | null = awsKind ? null
+        : m.provider === 'OpenRouter' ? 'openrouter' : m.protocol === 'gemini' ? 'gemini' : m.protocol === 'qwen-omni' ? 'dashscope' : m.protocol === 'mimo' ? 'mimo' : 'deepseek'
       const placeholder = m.provider === 'OpenRouter' ? 'sk-or-v1-...' : m.protocol === 'gemini' ? 'AIzaSy...' : 'sk-...'
-      acc[m.provider] = { keyField, placeholder, models: [] }
+      acc[m.provider] = { keyField, aws: awsKind, placeholder, models: [] }
     }
     acc[m.provider].models.push(m)
     return acc
@@ -137,27 +181,31 @@ export function ModelsTab({ config, onSave }: Props) {
 
       <div className="models-section-title">预置模型</div>
       {Object.entries(builtinByProvider).map(([provider, group]) => {
-        const keyValue = group.keyField === 'gemini' ? geminiKey
-          : group.keyField === 'dashscope' ? config.models.builtinApiKeys.dashscope
-          : group.keyField === 'openrouter' ? config.models.builtinApiKeys.openrouter
-          : group.keyField === 'mimo' ? config.models.builtinApiKeys.mimo
+        const keyField = group.keyField
+        const keyValue = keyField === null ? ''
+          : keyField === 'gemini' ? geminiKey
+          : keyField === 'dashscope' ? config.models.builtinApiKeys.dashscope
+          : keyField === 'openrouter' ? config.models.builtinApiKeys.openrouter
+          : keyField === 'mimo' ? config.models.builtinApiKeys.mimo
           : deepseekKey
         return (
           <div key={provider} className="model-card">
             <div className="model-card-header">
               <span className="model-card-title">{provider}</span>
             </div>
-            <div className="model-card-row">
-              <label>API Key</label>
-              <div className="api-key-wrapper">
-                <input className="input" type={visibleKeys[group.keyField] ? 'text' : 'password'} value={keyValue} onChange={e => updateBuiltinKey(group.keyField, e.target.value)} placeholder={group.placeholder} />
-                {keyValue && (
-                  <button className="api-key-toggle" onClick={() => toggleKeyVisibility(group.keyField)} title={visibleKeys[group.keyField] ? '隐藏密钥' : '显示密钥'}>
-                    <EyeIcon visible={visibleKeys[group.keyField]} />
-                  </button>
-                )}
+            {group.aws ? renderAwsFields(group.aws) : keyField && (
+              <div className="model-card-row">
+                <label>API Key</label>
+                <div className="api-key-wrapper">
+                  <input className="input" type={visibleKeys[keyField] ? 'text' : 'password'} value={keyValue} onChange={e => updateBuiltinKey(keyField, e.target.value)} placeholder={group.placeholder} />
+                  {keyValue && (
+                    <button className="api-key-toggle" onClick={() => toggleKeyVisibility(keyField)} title={visibleKeys[keyField] ? '隐藏密钥' : '显示密钥'}>
+                      <EyeIcon visible={visibleKeys[keyField]} />
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
             <div className="provider-model-list">
               {group.models.map(m => (
                 <div key={m.id} className="provider-model-item">
@@ -220,13 +268,21 @@ export function ModelsTab({ config, onSave }: Props) {
               <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
                 <input type="radio" checked={form.protocol === 'openai-compat' && form.baseUrl === 'https://openrouter.ai/api/v1'} onChange={() => setForm(f => ({ ...f, protocol: 'openai-compat', baseUrl: 'https://openrouter.ai/api/v1' }))} /> OpenRouter
               </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
+                <input type="radio" checked={form.protocol === 'bedrock'} onChange={() => setForm(f => ({ ...f, protocol: 'bedrock', baseUrl: '', apiKey: '', supportsAudio: false }))} /> Amazon Bedrock
+              </label>
             </div>
           </div>
+          {form.protocol === 'bedrock' && (
+            <div className="model-card-subtitle" style={{ marginBottom: 8 }}>
+              使用上方「Amazon Bedrock」卡里的 AWS Profile / Region；Model ID 填 Bedrock 模型或推理配置 id（如 global.anthropic.claude-sonnet-5）。
+            </div>
+          )}
           <div className="model-form-row">
             <label>模型能力</label>
             <div style={{ display: 'flex', gap: 12 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
-                <input type="checkbox" checked={form.supportsAudio} onChange={e => setForm(f => ({ ...f, supportsAudio: e.target.checked }))} /> 音频转写
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: form.protocol === 'bedrock' ? 'not-allowed' : 'pointer', color: 'var(--text-primary)', opacity: form.protocol === 'bedrock' ? 0.5 : 1 }} title={form.protocol === 'bedrock' ? 'Bedrock 上的 Claude 不支持音频输入' : undefined}>
+                <input type="checkbox" checked={form.supportsAudio} disabled={form.protocol === 'bedrock'} onChange={e => setForm(f => ({ ...f, supportsAudio: e.target.checked }))} /> 音频转写
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
                 <input type="checkbox" checked={form.supportsVision} onChange={e => setForm(f => ({ ...f, supportsVision: e.target.checked }))} /> 图像识别
@@ -246,8 +302,10 @@ export function ModelsTab({ config, onSave }: Props) {
             </div>
           )}
           <div className="model-form-row"><label>Provider</label><input className="input" value={form.provider} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))} placeholder="提供商名称" style={{ flex: 1, maxWidth: 300 }} /></div>
-          <div className="model-form-row"><label>Base URL</label><input className="input" value={form.baseUrl} onChange={e => setForm(f => ({ ...f, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" style={{ flex: 1, maxWidth: 400 }} /></div>
-          <div className="model-form-row"><label>Model ID</label><input className="input" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} placeholder="gemini-3.7-flash" style={{ flex: 1, maxWidth: 300 }} /></div>
+          {form.protocol !== 'bedrock' && (
+            <div className="model-form-row"><label>Base URL</label><input className="input" value={form.baseUrl} onChange={e => setForm(f => ({ ...f, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" style={{ flex: 1, maxWidth: 400 }} /></div>
+          )}
+          <div className="model-form-row"><label>Model ID</label><input className="input" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} placeholder={form.protocol === 'bedrock' ? 'global.anthropic.claude-sonnet-5' : 'gemini-3.7-flash'} style={{ flex: 1, maxWidth: 300 }} /></div>
           {form.protocol === 'openai-compat' && (
             <div className="model-form-row" style={{ alignItems: 'flex-start' }}>
               <label style={{ paddingTop: 7 }}>chat_template_kwargs</label>
@@ -268,20 +326,22 @@ export function ModelsTab({ config, onSave }: Props) {
               </div>
             </div>
           )}
-          <div className="model-form-row">
-            <label>API Key</label>
-            <div className="api-key-wrapper" style={{ maxWidth: 400 }}>
-              <input className="input" type={visibleKeys['custom-form'] ? 'text' : 'password'} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} />
-              {form.apiKey && (
-                <button className="api-key-toggle" onClick={() => toggleKeyVisibility('custom-form')} title={visibleKeys['custom-form'] ? '隐藏密钥' : '显示密钥'}>
-                  <EyeIcon visible={visibleKeys['custom-form']} />
-                </button>
-              )}
+          {form.protocol !== 'bedrock' && (
+            <div className="model-form-row">
+              <label>API Key</label>
+              <div className="api-key-wrapper" style={{ maxWidth: 400 }}>
+                <input className="input" type={visibleKeys['custom-form'] ? 'text' : 'password'} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} />
+                {form.apiKey && (
+                  <button className="api-key-toggle" onClick={() => toggleKeyVisibility('custom-form')} title={visibleKeys['custom-form'] ? '隐藏密钥' : '显示密钥'}>
+                    <EyeIcon visible={visibleKeys['custom-form']} />
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
+          )}
           <div className="model-form-actions">
             <button className="model-form-btn" onClick={cancelForm}>取消</button>
-            <button className="model-form-btn primary" onClick={saveCustomModel} disabled={!!chatTemplateKwargsError || !form.provider || !form.baseUrl || !form.model || (!form.supportsAudio && !form.supportsText && !form.supportsVision)}>保存</button>
+            <button className="model-form-btn primary" onClick={saveCustomModel} disabled={!!chatTemplateKwargsError || !form.provider || (form.protocol !== 'bedrock' && !form.baseUrl) || !form.model || (!form.supportsAudio && !form.supportsText && !form.supportsVision)}>保存</button>
           </div>
         </div>
       ) : (

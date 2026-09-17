@@ -10,6 +10,7 @@ import { VoicePromptsTab } from './tabs/VoicePromptsTab'
 import { ExtractPromptsTab } from './tabs/ExtractPromptsTab'
 import { BackupTab } from './tabs/BackupTab'
 import { VoiceLearningTab } from './tabs/VoiceLearningTab'
+import { MeetingTab } from './tabs/MeetingTab'
 import type { AppConfig, UpdateState, UpdateInfo } from '../../core/types'
 import { getVersion } from '@tauri-apps/api/app'
 import { getConfig, saveConfig, onEvent, checkUpdate } from '../../lib/tauri-api'
@@ -31,6 +32,8 @@ const TABS: TabItem[] = [
   { type: 'tab', id: 'extract-prompts', label: '图像识别提示词' },
   { type: 'group', label: '智能学习' },
   { type: 'tab', id: 'voice-learning', label: '自动学习' },
+  { type: 'group', label: '会议' },
+  { type: 'tab', id: 'meeting', label: '会议记录' },
   { type: 'divider' },
   { type: 'tab', id: 'history', label: '历史记录' },
   { type: 'tab', id: 'usage', label: '用量统计' },
@@ -116,6 +119,13 @@ export function App() {
       }
     }).then(unsub => { if (cancelled) unsub(); else unsubNavigate = unsub })
 
+    // 托盘等后端入口改了配置（比如切换「自动检测 Zoom 会议」）时重新拉取
+    let unsubConfigUpdated: (() => void) | null = null
+    onEvent<Record<string, never>>('config-updated', () => {
+      if (cancelled) return
+      getConfig().then(c => { if (!cancelled) setConfig(c) }).catch(() => {})
+    }).then(unsub => { if (cancelled) unsub(); else unsubConfigUpdated = unsub })
+
     return () => {
       cancelled = true
       unsubUpdateAvailable?.()
@@ -123,6 +133,7 @@ export function App() {
       unsubComplete?.()
       unsubError?.()
       unsubNavigate?.()
+      unsubConfigUpdated?.()
     }
   }, [])
 
@@ -213,6 +224,7 @@ export function App() {
         {activeTab === 'transcribe' && <TranscribeTab config={config} onSave={handleSave} />}
         {activeTab === 'models' && <ModelsTab config={config} onSave={handleSave} />}
         {activeTab === 'voice-learning' && <VoiceLearningTab config={config} onSave={handleSave} />}
+        {activeTab === 'meeting' && <MeetingTab config={config} onSave={handleSave} />}
         {activeTab === 'extract' && <ExtractTab config={config} onSave={handleSave} />}
         {activeTab === 'voice-prompts' && <VoicePromptsTab config={config} onSave={handleSave} />}
         {activeTab === 'extract-prompts' && <ExtractPromptsTab config={config} onSave={handleSave} />}

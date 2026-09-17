@@ -14,6 +14,7 @@ export default defineConfig({
         bubble: resolve(__dirname, 'bubble.html'),
         preview: resolve(__dirname, 'preview.html'),
         learning: resolve(__dirname, 'learning.html'),
+        meeting: resolve(__dirname, 'meeting.html'),
         screenshot: resolve(__dirname, 'screenshot.html'),
       }
     }

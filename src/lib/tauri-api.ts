@@ -2,7 +2,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs'
-import type { AppConfig, AudioDevice, UpdateInfo, BackupEntry, LocalApiStatus } from '../core/types'
+import type {
+  AppConfig, AudioDevice, UpdateInfo, BackupEntry, LocalApiStatus,
+  MeetingStatus, MeetingMeta, MeetingDetail, MeetingSupport,
+} from '../core/types'
 
 // Config commands
 export async function getConfig(): Promise<AppConfig> {
@@ -133,4 +136,70 @@ export async function backupToLocal(): Promise<string> {
 
 export async function restoreFromLocal(): Promise<void> {
   return invoke<void>('restore_from_local')
+}
+
+// ==================== Meeting ====================
+
+export async function getMeetingStatus(): Promise<MeetingStatus> {
+  return invoke<MeetingStatus>('meeting_get_status')
+}
+
+export async function startMeeting(): Promise<MeetingStatus> {
+  return invoke<MeetingStatus>('meeting_start')
+}
+
+export async function stopMeeting(): Promise<MeetingStatus> {
+  return invoke<MeetingStatus>('meeting_stop')
+}
+
+export async function discardMeeting(): Promise<void> {
+  return invoke<void>('meeting_discard')
+}
+
+export async function listMeetings(): Promise<MeetingMeta[]> {
+  return invoke<MeetingMeta[]>('meeting_list')
+}
+
+export async function getMeeting(id: string): Promise<MeetingDetail> {
+  return invoke<MeetingDetail>('meeting_get', { id })
+}
+
+export async function deleteMeeting(id: string): Promise<void> {
+  return invoke<void>('meeting_delete', { id })
+}
+
+export async function saveMeetingSummary(id: string, content: string): Promise<void> {
+  return invoke<void>('meeting_save_summary', { id, content })
+}
+
+export async function regenerateMeetingSummary(id: string): Promise<void> {
+  return invoke<void>('meeting_regenerate_summary', { id })
+}
+
+export async function pickNotesFolder(): Promise<string | null> {
+  return invoke<string | null>('meeting_pick_notes_folder')
+}
+
+export async function getNotesFolder(): Promise<string> {
+  return invoke<string>('meeting_notes_folder')
+}
+
+export async function revealMeeting(id: string): Promise<void> {
+  return invoke<void>('meeting_reveal', { id })
+}
+
+export async function checkMeetingSupport(): Promise<MeetingSupport> {
+  return invoke<MeetingSupport>('meeting_check_support')
+}
+
+export async function requestMeetingPermissions(): Promise<void> {
+  return invoke<void>('meeting_request_permissions')
+}
+
+export async function openMeetingWindow(meetingId?: string): Promise<void> {
+  return invoke<void>('meeting_open_window', { meetingId: meetingId ?? null })
+}
+
+export async function closeMeetingWindow(): Promise<void> {
+  return invoke<void>('meeting_close_window')
 }

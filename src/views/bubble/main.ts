@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 const bubble = document.getElementById('bubble')!
 const currentWindow = getCurrentWindow()
 let currentTaskId: number = 0
+let currentStatus: string = ''
 
 type Look = {
   shape: 'is-round' | 'is-pill'
@@ -26,6 +27,11 @@ const looks: Record<string, Look> = {
   retrying:     { shape: 'is-pill', color: 'c-retrying', label: 'Thinking...', cancel: true },
   completed:    { shape: 'is-round', color: 'c-completed', glyph: '✓' },
   failed:       { shape: 'is-round', color: 'c-failed', glyph: '✕' },
+  // 会议记录（独立的 bubble-meeting 窗口）：✕ 是「停止录制」而不是取消任务
+  'meeting-detected':    { shape: 'is-pill', color: 'c-recording', label: '会议录制中', dot: true, cancel: true },
+  'meeting-summarizing': { shape: 'is-pill', color: 'c-thinking', label: 'Summarizing...' },
+  'meeting-done':        { shape: 'is-round', color: 'c-completed', glyph: '✓' },
+  'meeting-failed':      { shape: 'is-round', color: 'c-failed', glyph: '✕' },
 }
 
 function classFor(look: Look): string {
@@ -66,6 +72,10 @@ function render(status: string) {
   el.querySelector('.cancel-btn')!.addEventListener('mousedown', (e) => {
     e.preventDefault()
     e.stopPropagation()
+    if (currentStatus.startsWith('meeting')) {
+      invoke('meeting_stop').catch((err) => console.error('meeting_stop failed:', err))
+      return
+    }
     invoke('cancel_task', { taskId: currentTaskId }).catch((err) => console.error('cancel_task failed:', err))
   })
   bubble.appendChild(el)
@@ -75,16 +85,19 @@ function render(status: string) {
 currentWindow.listen('clear-bubble', () => {
   bubble.innerHTML = ''
   currentTaskId = 0
+  currentStatus = ''
 })
 
 currentWindow.listen<{ taskNumber: number; status: string }>('show-bubble', (event) => {
   const { taskNumber, status } = event.payload
   currentTaskId = taskNumber
+  currentStatus = status
   render(status)
 })
 
 currentWindow.listen<{ taskNumber: number; status: string }>('update-bubble', (event) => {
   const { taskNumber, status } = event.payload
   currentTaskId = taskNumber
+  currentStatus = status
   render(status)
 })

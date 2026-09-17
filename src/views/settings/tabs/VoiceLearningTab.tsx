@@ -42,6 +42,8 @@ export function VoiceLearningTab({ config, onSave }: Props) {
   const supportsMinimal = supportsMinimalThinking(selectedModel?.model)
   const isDeepSeek = selectedModel?.protocol === 'openai-compat'
     && (selectedModel.baseUrl?.includes('api.deepseek.com') ?? false)
+  // Bedrock 上的 Claude 走扩展思考，LOW / MEDIUM / HIGH 对应不同思考预算，没有 MINIMAL
+  const isBedrock = selectedModel?.protocol === 'bedrock'
 
   const updateModel = (modelId: string) => {
     onSave({
@@ -93,7 +95,7 @@ export function VoiceLearningTab({ config, onSave }: Props) {
             )}
           </select>
         </SettingRow>
-        {(isGemini || isDeepSeek) && (
+        {(isGemini || isDeepSeek || isBedrock) && (
           <SettingRow label="启用思考" description="让模型在归纳纠错规则前先进行推理">
             <Toggle
               checked={config.voiceLearning.thinking.enabled}
@@ -101,15 +103,15 @@ export function VoiceLearningTab({ config, onSave }: Props) {
             />
           </SettingRow>
         )}
-        {isGemini && config.voiceLearning.thinking.enabled && (
+        {(isGemini || isBedrock) && config.voiceLearning.thinking.enabled && (
           <SettingRow label="Thinking Level" description="思考深度级别">
             <select
               className="select"
-              value={supportsMinimal || config.voiceLearning.thinking.level !== 'MINIMAL' ? config.voiceLearning.thinking.level : 'LOW'}
+              value={(supportsMinimal && !isBedrock) || config.voiceLearning.thinking.level !== 'MINIMAL' ? config.voiceLearning.thinking.level : 'LOW'}
               onChange={event => updateThinking({ level: event.target.value as AppConfig['voiceLearning']['thinking']['level'] })}
               style={{ width: 120 }}
             >
-              {supportsMinimal && <option value="MINIMAL">MINIMAL</option>}
+              {supportsMinimal && !isBedrock && <option value="MINIMAL">MINIMAL</option>}
               <option value="LOW">LOW</option>
               <option value="MEDIUM">MEDIUM</option>
               <option value="HIGH">HIGH</option>

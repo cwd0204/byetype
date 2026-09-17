@@ -339,15 +339,7 @@ fn register_image_shortcut(
     Ok(())
 }
 
+/// 听写录音状态交给 tray 统一合成图标（会议录制也会点亮同一个图标）。
 fn update_tray_icon(app: &AppHandle, is_recording: bool) {
-    if let Some(tray) = app.tray_by_id("main-tray") {
-        let icon_bytes: &[u8] = if is_recording {
-            include_bytes!("../icons/tray-recording.png")
-        } else {
-            include_bytes!("../icons/tray-default.png")
-        };
-        if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
-            let _ = tray.set_icon(Some(icon));
-        }
-    }
+    crate::tray::set_dictation_recording(app, is_recording);
 }

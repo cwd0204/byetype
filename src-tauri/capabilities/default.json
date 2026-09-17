@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for ByeType",
-  "windows": ["settings", "learning", "worker", "bubble*", "preview*"],
+  "windows": ["settings", "learning", "meeting", "worker", "bubble*", "preview*"],
   "permissions": [
     "core:default",
     "core:event:default",
