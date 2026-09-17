@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { HistoryRecord, RetryStatusUpdate } from '../../../core/types'
 import { onEvent } from '../../../lib/tauri-api'
 import { invoke } from '@tauri-apps/api/core'
+import { t, useLang } from '../../../i18n'
 
 function formatTime(isoString: string): string {
   const date = new Date(isoString)
@@ -27,15 +28,15 @@ function getStageInfo(record: HistoryRecord, retryStage?: string): StageInfo {
     if (retryStage === 'transcribing' || retryStage === 'retrying') {
       return {
         audio: 'success',
-        transcribe: { status: 'processing', text: retryStage === 'retrying' ? '重试中...' : '转写中...' },
-        optimize: { status: 'pending', text: '等待中' }
+        transcribe: { status: 'processing', text: retryStage === 'retrying' ? t('history.stage.retrying') : t('history.stage.transcribing') },
+        optimize: { status: 'pending', text: t('history.stage.waiting') }
       }
     }
     if (retryStage === 'optimizing') {
       return {
         audio: 'success',
         transcribe: { status: 'success', text: record.transcribeText || '' },
-        optimize: { status: 'processing', text: '优化中...' }
+        optimize: { status: 'processing', text: t('history.stage.optimizing') }
       }
     }
   }
@@ -45,8 +46,8 @@ function getStageInfo(record: HistoryRecord, retryStage?: string): StageInfo {
       audio: record.audioPath ? 'success' : 'pending',
       transcribe: record.transcribeText
         ? { status: 'success', text: record.transcribeText }
-        : { status: 'pending', text: '已取消' },
-      optimize: { status: 'pending', text: '已取消' }
+        : { status: 'pending', text: t('history.stage.cancelled') },
+      optimize: { status: 'pending', text: t('history.stage.cancelled') }
     }
   }
 
@@ -56,7 +57,7 @@ function getStageInfo(record: HistoryRecord, retryStage?: string): StageInfo {
   if (record.transcribeText) {
     transcribe = { status: 'success', text: record.transcribeText }
   } else if (record.status === 'failed') {
-    transcribe = { status: 'error', text: record.errorMessage?.slice(0, 30) || '失败' }
+    transcribe = { status: 'error', text: record.errorMessage?.slice(0, 30) || t('history.stage.failed') }
   } else {
     transcribe = { status: 'pending', text: '\u2014' }
   }
@@ -65,7 +66,7 @@ function getStageInfo(record: HistoryRecord, retryStage?: string): StageInfo {
   if (record.optimizeText) {
     optimize = { status: 'success', text: record.optimizeText }
   } else if (record.transcribeText && record.status === 'failed') {
-    optimize = { status: 'error', text: record.errorMessage?.slice(0, 30) || '失败' }
+    optimize = { status: 'error', text: record.errorMessage?.slice(0, 30) || t('history.stage.failed') }
   } else if (!record.transcribeText && record.status === 'failed') {
     optimize = { status: 'pending', text: '\u2014' }
   } else {
@@ -95,6 +96,7 @@ function StageIndicator({ status }: { status: StageStatus }) {
 }
 
 function CopyButton({ text }: { text: string }) {
+  useLang()
   const [copied, setCopied] = useState(false)
 
   const handleCopy = useCallback((e: React.MouseEvent) => {
@@ -111,7 +113,7 @@ function CopyButton({ text }: { text: string }) {
     <span
       className="history-copy-btn"
       onClick={handleCopy}
-      title={copied ? '已复制' : '复制'}
+      title={copied ? t('history.copied') : t('common.copy')}
     >
       {copied ? '\u2713' : '\uD83D\uDCCB'}
     </span>
@@ -128,7 +130,7 @@ function getExtractStageInfo(record: HistoryRecord, retryStage?: string): { scre
   if (retryStage && (retryStage === 'retrying' || retryStage === 'extracting' || retryStage === 'transcribing')) {
     return {
       screenshot: 'success',
-      extract: { status: 'processing', text: '识别中...' }
+      extract: { status: 'processing', text: t('history.stage.extracting') }
     }
   }
 
@@ -138,9 +140,9 @@ function getExtractStageInfo(record: HistoryRecord, retryStage?: string): { scre
   if (record.extractText) {
     extract = { status: 'success', text: record.extractText }
   } else if (record.status === 'failed') {
-    extract = { status: 'error', text: record.errorMessage?.slice(0, 30) || '失败' }
+    extract = { status: 'error', text: record.errorMessage?.slice(0, 30) || t('history.stage.failed') }
   } else if (record.status === 'cancelled') {
-    extract = { status: 'pending', text: '已取消' }
+    extract = { status: 'pending', text: t('history.stage.cancelled') }
   } else {
     extract = { status: 'pending', text: '\u2014' }
   }
@@ -149,6 +151,7 @@ function getExtractStageInfo(record: HistoryRecord, retryStage?: string): { scre
 }
 
 function RecordRow({ record, retryStage, onRetry }: RecordRowProps) {
+  useLang()
   const isExtract = record.recordType === 'extract'
   const isRetrying = !!retryStage
 
@@ -163,22 +166,22 @@ function RecordRow({ record, retryStage, onRetry }: RecordRowProps) {
             {formatTime(record.createdAt)}
           </span>
           <div className="history-pipeline">
-            <span className="history-stage-dot"><StageIndicator status={info.screenshot} /> 截图</span>
+            <span className="history-stage-dot"><StageIndicator status={info.screenshot} /> {t('history.screenshot')}</span>
             <span className="history-arrow">{'\u2192'}</span>
-            <span className="history-stage-dot"><StageIndicator status={info.extract.status} /> 识别</span>
+            <span className="history-stage-dot"><StageIndicator status={info.extract.status} /> {t('history.extract')}</span>
           </div>
           <button
             className={`history-retry-btn${(record.status === 'failed' || record.status === 'cancelled') && !isRetrying && !screenshotMissing ? ' highlight' : ''}`}
             disabled={isRetrying || screenshotMissing}
-            title={screenshotMissing ? '截图文件已丢失' : isRetrying ? '重试中' : '重试'}
+            title={screenshotMissing ? t('history.screenshotMissing') : isRetrying ? t('history.retrying') : t('common.retry')}
             onClick={() => onRetry(record.id)}
           >
-            {isRetrying ? '重试中' : '重试'}
+            {isRetrying ? t('history.retrying') : t('common.retry')}
           </button>
         </div>
         <div className="history-row-bottom">
           <div className="history-text-cell">
-            <span className="history-text-label">识别</span>
+            <span className="history-text-label">{t('history.extract')}</span>
             <span
               className="history-text-content"
               style={info.extract.status === 'error' ? { color: '#ff3b30' } : undefined}
@@ -206,24 +209,24 @@ function RecordRow({ record, retryStage, onRetry }: RecordRowProps) {
           {formatTime(record.createdAt)}
         </span>
         <div className="history-pipeline">
-          <span className="history-stage-dot"><StageIndicator status={info.audio} /> 音频</span>
+          <span className="history-stage-dot"><StageIndicator status={info.audio} /> {t('history.audio')}</span>
           <span className="history-arrow">{'\u2192'}</span>
-          <span className="history-stage-dot"><StageIndicator status={info.transcribe.status} /> 转写</span>
+          <span className="history-stage-dot"><StageIndicator status={info.transcribe.status} /> {t('history.transcribe')}</span>
           <span className="history-arrow">{'\u2192'}</span>
-          <span className="history-stage-dot"><StageIndicator status={info.optimize.status} /> 优化</span>
+          <span className="history-stage-dot"><StageIndicator status={info.optimize.status} /> {t('history.optimize')}</span>
         </div>
         <button
           className={`history-retry-btn${(record.status === 'failed' || record.status === 'cancelled') && !isRetrying && !audioMissing ? ' highlight' : ''}`}
           disabled={isRetrying || audioMissing}
-          title={audioMissing ? '音频文件已丢失' : isRetrying ? '重试中' : '重试'}
+          title={audioMissing ? t('history.audioMissing') : isRetrying ? t('history.retrying') : t('common.retry')}
           onClick={() => onRetry(record.id)}
         >
-          {isRetrying ? '重试中' : '重试'}
+          {isRetrying ? t('history.retrying') : t('common.retry')}
         </button>
       </div>
       <div className="history-row-bottom">
         <div className="history-text-cell">
-          <span className="history-text-label">转写</span>
+          <span className="history-text-label">{t('history.transcribe')}</span>
           <span
             className="history-text-content"
             style={info.transcribe.status === 'error' ? { color: '#ff3b30' } : info.transcribe.status === 'processing' ? { color: '#ff9500' } : undefined}
@@ -236,7 +239,7 @@ function RecordRow({ record, retryStage, onRetry }: RecordRowProps) {
           )}
         </div>
         <div className="history-text-cell">
-          <span className="history-text-label">优化</span>
+          <span className="history-text-label">{t('history.optimize')}</span>
           <span
             className="history-text-content"
             style={info.optimize.status === 'error' ? { color: '#ff3b30' } : info.optimize.status === 'processing' ? { color: '#ff9500' } : undefined}
@@ -254,6 +257,7 @@ function RecordRow({ record, retryStage, onRetry }: RecordRowProps) {
 }
 
 export function HistoryTab() {
+  useLang()
   const [records, setRecords] = useState<HistoryRecord[]>([])
   const [retryStatus, setRetryStatus] = useState<Map<number, string>>(new Map())
 
@@ -319,9 +323,9 @@ export function HistoryTab() {
 
   return (
     <div>
-      <h2 className="content-title">历史记录</h2>
+      <h2 className="content-title">{t('history.title')}</h2>
       {records.length === 0 ? (
-        <div className="history-empty">暂无记录</div>
+        <div className="history-empty">{t('history.empty')}</div>
       ) : (
         <div className="history-list">
           {[...records].reverse().map(record => (

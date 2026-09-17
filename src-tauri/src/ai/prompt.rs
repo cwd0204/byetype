@@ -54,6 +54,10 @@ fn resolve_transcription_reference_paths(
     )
 }
 
+/// 听写转写提示词（agent + vocabulary + rules + voice-learning）。
+/// 当前唯一的转写通道 Amazon Transcribe 吃不到提示词，所以这条路径暂时闲置；
+/// 保留是为了将来接入支持提示词的音频模型时直接可用。
+#[allow(dead_code)]
 pub fn build_transcribe_prompt(
     config: &AppConfig,
     prompts_dir: &Path,
@@ -128,64 +132,6 @@ pub fn build_optimize_prompt(
 
 pub fn build_extract_prompt(config: &AppConfig, prompts_dir: &Path, template_id: &str) -> String {
     load_template_prompt(&config.extract.templates, template_id, prompts_dir)
-}
-
-/// 会议分段转写时附带的上下文。
-pub struct MeetingChunkContext<'a> {
-    pub chunk_index: u32,
-    pub start_offset_secs: u64,
-    /// 上一段转写的结尾，只用于承接语义
-    pub previous_tail: &'a str,
-    /// 「我 / 对方」能量提示，两个音轨都有时才有内容
-    pub speaker_hints: &'a str,
-}
-
-fn format_offset(secs: u64) -> String {
-    format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-}
-
-/// 会议分段转写提示词：meeting-transcribe + vocabulary + voice-learning + 本段上下文。
-/// 不带 agent.md / rules.md——那两份是听写的单行输出与格式规则，和多人对话冲突。
-pub fn build_meeting_transcribe_prompt(
-    config: &AppConfig,
-    prompts_dir: &Path,
-    learning_rules: &str,
-    ctx: &MeetingChunkContext<'_>,
-) -> String {
-    let main_path = resolve_prompt_path(
-        &config.meeting.prompts.transcribe,
-        &prompts_dir.join("meeting-transcribe.md").to_string_lossy(),
-    );
-    let (_, vocabulary_path) = resolve_transcription_reference_paths(config, prompts_dir);
-
-    let mut context = format!(
-        "这是第 {} 段，起点 {}。",
-        ctx.chunk_index + 1,
-        format_offset(ctx.start_offset_secs)
-    );
-    if !ctx.previous_tail.trim().is_empty() {
-        context.push_str(&format!(
-            "\n<previous-tail>\n{}\n</previous-tail>",
-            ctx.previous_tail.trim()
-        ));
-    }
-    if !ctx.speaker_hints.trim().is_empty() {
-        context.push_str(&format!(
-            "\n<speaker-hints>\n{}\n</speaker-hints>",
-            ctx.speaker_hints.trim()
-        ));
-    }
-
-    [
-        wrap_document("meeting-transcribe", &load_prompt(&main_path)),
-        wrap_document("vocabulary", &load_prompt(&vocabulary_path)),
-        wrap_document("voice-learning", learning_rules),
-        wrap_document("context", &context),
-    ]
-    .into_iter()
-    .filter(|s| !s.is_empty())
-    .collect::<Vec<_>>()
-    .join("\n\n")
 }
 
 /// 会议纪要提示词：只有 meeting-summary 一份文档。
@@ -310,14 +256,18 @@ mod tests {
         std::fs::write(prompts_dir.join("vocabulary.md"), "专有词汇").unwrap();
         std::fs::write(prompts_dir.join("text-optimize.md"), "文本优化提示词").unwrap();
 
+        // 转写模型不是 Transcribe（这里借用一个 Bedrock id 触发分支）且开关关闭时，
+        // 优化阶段只带优化模板本身。
+        let mut config = AppConfig::default();
+        config.transcribe.model_id = "builtin-bedrock-claude-sonnet-5".to_string();
         let prompt = build_optimize_prompt(
-            &AppConfig::default(),
+            &config,
             &prompts_dir,
             "voice-optimize",
             "自动学习结果",
         );
 
-        // 默认(开关关闭)时优化阶段只带优化模板本身,不重复带入转写参考。
+        // 开关关闭时优化阶段只带优化模板本身,不重复带入转写参考。
         assert_eq!(
             prompt,
             "<document name=\"text-optimize\">\n文本优化提示词\n</document>"
@@ -326,39 +276,6 @@ mod tests {
         assert!(!prompt.contains("专有词汇"));
         assert!(!prompt.contains("自动学习结果"));
         assert!(!prompt.contains("角色定义"));
-
-        std::fs::remove_dir_all(prompts_dir).unwrap();
-    }
-
-    #[test]
-    fn meeting_transcribe_prompt_carries_vocabulary_and_context() {
-        let prompts_dir = test_prompts_dir("meeting-transcribe");
-        std::fs::write(prompts_dir.join("meeting-transcribe.md"), "会议转写规则").unwrap();
-        std::fs::write(prompts_dir.join("vocabulary.md"), "专有词汇").unwrap();
-        std::fs::write(prompts_dir.join("agent.md"), "角色定义").unwrap();
-        std::fs::write(prompts_dir.join("rules.md"), "听写规则").unwrap();
-
-        let ctx = MeetingChunkContext {
-            chunk_index: 2,
-            start_offset_secs: 3725,
-            previous_tail: "上一段结尾",
-            speaker_hints: "00:00-00:10 我",
-        };
-        let prompt = build_meeting_transcribe_prompt(
-            &AppConfig::default(),
-            &prompts_dir,
-            "学习结果",
-            &ctx,
-        );
-
-        assert!(prompt.starts_with("<document name=\"meeting-transcribe\">\n会议转写规则"));
-        assert!(prompt.contains("<document name=\"vocabulary\">\n专有词汇"));
-        assert!(prompt.contains("<document name=\"voice-learning\">\n学习结果"));
-        assert!(prompt.contains("这是第 3 段，起点 01:02:05。"));
-        assert!(prompt.contains("<previous-tail>\n上一段结尾\n</previous-tail>"));
-        assert!(prompt.contains("<speaker-hints>\n00:00-00:10 我\n</speaker-hints>"));
-        assert!(!prompt.contains("角色定义"));
-        assert!(!prompt.contains("听写规则"));
 
         std::fs::remove_dir_all(prompts_dir).unwrap();
     }

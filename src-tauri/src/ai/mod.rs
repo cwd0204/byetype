@@ -1,30 +1,25 @@
-pub mod types;
-pub mod transport;
-pub mod retry;
-pub mod gemini;
-pub mod openai_compat;
-pub mod mimo;
-pub mod deepseek;
-pub mod prompt;
-pub mod models;
+//! AI 层：只有 AWS 两条路径。
+//! - 音频 → Amazon Transcribe（`transcribe_aws.rs`）
+//! - 文本 / 图像 → Bedrock 上的 Claude（`bedrock.rs`）
+//!
+//! 所有调用成功后都经 `record_usage` 记入用量统计。
+
 pub mod aws;
 pub mod bedrock;
+pub mod models;
+pub mod prompt;
+pub mod retry;
 pub mod transcribe_aws;
+pub mod types;
 
 use crate::config::types::{AppConfig, ThinkingConfig};
+use crate::i18n::{tr, tr_fmt};
 use crate::usage;
 use base64::Engine as _;
 use models::{PROTOCOL_AWS_TRANSCRIBE, PROTOCOL_BEDROCK};
 use std::path::Path;
+use transcribe_aws::TranscribeOptions;
 use types::TokenUsage;
-
-/// 判断 resolved model 是否走 DeepSeek 官方 API。
-/// 条件:协议是 openai-compat 且 base_url 指向 api.deepseek.com。
-/// 这样 OpenRouter 上的 `deepseek/*` 模型仍走标准 openai-compat 路径(不传 thinking)。
-pub(crate) fn is_deepseek(resolved: &models::ResolvedModel) -> bool {
-    resolved.protocol == "openai-compat"
-        && resolved.base_url.contains("api.deepseek.com")
-}
 
 /// 把一次成功调用的用量写入统计。失败调用不记录，重试中的失败也不记录。
 fn record_usage(scene: &str, resolved: &models::ResolvedModel, usage: TokenUsage) {
@@ -52,132 +47,53 @@ fn ai_output(text: String, resolved: &models::ResolvedModel) -> AiOutput {
     }
 }
 
-/// Transcribe audio using the configured provider.
+/// 听写转写。Transcribe 吃不到提示词，所以 prompts_dir / learning_rules 在这里用不上，
+/// 专有词纠错由文本优化阶段补上（prompt.rs `build_optimize_prompt`）。
+/// 参数形态保留是为了和 task 管道的调用方式一致。
 pub async fn transcribe(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     audio_base64: &str,
     config: &AppConfig,
-    prompts_dir: &Path,
-    learning_rules: &str,
+    _prompts_dir: &Path,
+    _learning_rules: &str,
 ) -> Result<AiOutput, String> {
-    let system_prompt = prompt::build_transcribe_prompt(config, prompts_dir, learning_rules);
-    transcribe_with_prompt(
-        client,
+    transcribe_audio(
         audio_base64,
         config,
         &config.transcribe.model_id,
-        &system_prompt,
-        &config.transcribe.thinking,
         "transcribe",
-        transcribe_aws::TranscribeOptions::default(),
+        TranscribeOptions::default(),
     )
     .await
 }
 
-/// 用指定模型与提示词转写一段 FLAC(base64)。听写与会议分段转写共用这条路径，
-/// 区别只在 model_id / 提示词 / 用量场景；`aws_opts` 只对 Amazon Transcribe 生效。
-#[allow(clippy::too_many_arguments)]
-pub async fn transcribe_with_prompt(
-    client: &reqwest::Client,
+/// 用指定音频模型转写一段 FLAC(base64)。听写与会议分段共用，区别只在场景与说话人分离开关。
+pub async fn transcribe_audio(
     audio_base64: &str,
     config: &AppConfig,
     model_id: &str,
-    system_prompt: &str,
-    thinking: &ThinkingConfig,
     scene: &str,
-    aws_opts: transcribe_aws::TranscribeOptions,
+    opts: TranscribeOptions,
 ) -> Result<AiOutput, String> {
     let resolved = models::resolve_model(config, model_id)?;
-
-    let outcome: Result<(String, TokenUsage), String> = if is_deepseek(&resolved) {
-        deepseek::transcribe(
-            client,
-            audio_base64,
-            system_prompt,
-            &resolved.api_key,
-            &resolved.model,
-            &resolved.base_url,
-        )
-        .await
-    } else {
-        match resolved.protocol.as_str() {
-            "gemini" => {
-                gemini::transcribe(
-                    client,
-                    audio_base64,
-                    system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                    thinking,
-                )
-                .await
-            }
-            "qwen-omni" => {
-                openai_compat::qwen_omni_transcribe(
-                    client,
-                    audio_base64,
-                    system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                )
-                .await
-            }
-            "mimo" => {
-                mimo::transcribe(
-                    client,
-                    audio_base64,
-                    system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                )
-                .await
-            }
-            PROTOCOL_AWS_TRANSCRIBE => {
-                // Transcribe 吃不到提示词；专有词纠错由文本优化阶段补上（prompt.rs）。
-                let flac = base64::engine::general_purpose::STANDARD
-                    .decode(audio_base64)
-                    .map_err(|e| format!("Transcribe: 音频 base64 解码失败: {}", e))?;
-                transcribe_aws::transcribe(&config.models.aws, flac, aws_opts)
-                    .await
-                    .map(|text| (text, TokenUsage::default()))
-            }
-            PROTOCOL_BEDROCK => Err(
-                "Bedrock 上的 Claude 不支持音频输入，语音转写请选择 Amazon Transcribe 或其他音频模型"
-                    .to_string(),
-            ),
-            _ => {
-                openai_compat::transcribe(
-                    client,
-                    audio_base64,
-                    system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                    resolved.audio_input_mode,
-                    resolved.chat_template_kwargs.as_ref(),
-                    Some(thinking),
-                )
-                .await
-            }
-        }
-    };
-
-    match outcome {
-        Ok((text, usage)) => {
-            record_usage(scene, &resolved, usage);
-            Ok(ai_output(text, &resolved))
-        }
-        Err(e) => Err(e),
+    if resolved.protocol != PROTOCOL_AWS_TRANSCRIBE {
+        return Err(tr_fmt(
+            "err.modelNoAudio",
+            &[("model", resolved.model.as_str())],
+        ));
     }
+    let flac = base64::engine::general_purpose::STANDARD
+        .decode(audio_base64)
+        .map_err(|e| tr_fmt("err.audioBase64", &[("error", e.to_string().as_str())]))?;
+    let text = transcribe_aws::transcribe(&config.models.aws, flac, opts).await?;
+    record_usage(scene, &resolved, TokenUsage::default());
+    Ok(ai_output(text, &resolved))
 }
 
 /// 图像识别用哪个模型的思考设置:
 /// 图像识别自己没有思考开关,默认沿用「文本优化模型」那一栏的思考设置,
 /// 让同一个模型在优化和取字两处表现一致。extract.thinking 单独设过时以它为准。
-fn extract_thinking(config: &AppConfig) -> &crate::config::types::ThinkingConfig {
+fn extract_thinking(config: &AppConfig) -> &ThinkingConfig {
     config
         .extract
         .thinking
@@ -185,192 +101,72 @@ fn extract_thinking(config: &AppConfig) -> &crate::config::types::ThinkingConfig
         .unwrap_or(&config.voice_templates.thinking)
 }
 
-/// Extract text from an image using the configured provider.
+/// 图像识别用哪个模型：单独设置了就用它，否则跟随文本优化模型（转写模型是 Transcribe，看不了图）。
+fn extract_model_id(config: &AppConfig) -> &str {
+    match config.extract.model_id.as_deref() {
+        Some(id) if !id.trim().is_empty() => id,
+        _ if !config.voice_templates.model_id.trim().is_empty() => &config.voice_templates.model_id,
+        _ => models::DEFAULT_TEXT_MODEL,
+    }
+}
+
+/// `what_key` 是 i18n 里 `what.*` 的用途名（图像识别 / 文本优化 / 文本处理）。
+fn require_bedrock(resolved: &models::ResolvedModel, what_key: &str) -> Result<(), String> {
+    if resolved.protocol != PROTOCOL_BEDROCK {
+        return Err(tr_fmt(
+            "err.modelTranscribeOnly",
+            &[("model", resolved.model.as_str()), ("what", tr(what_key))],
+        ));
+    }
+    Ok(())
+}
+
+/// Extract text from an image using the configured Bedrock model.
 pub async fn extract_text(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     image_base64: &str,
     config: &AppConfig,
     prompts_dir: &Path,
     template_id: &str,
 ) -> Result<String, String> {
-    let model_id = config.extract.model_id.as_deref().unwrap_or(&config.transcribe.model_id);
-    let resolved = models::resolve_model(config, model_id)?;
-    let thinking = extract_thinking(config);
+    let resolved = models::resolve_model(config, extract_model_id(config))?;
+    require_bedrock(&resolved, "what.extract")?;
     let system_prompt = prompt::build_extract_prompt(config, prompts_dir, template_id);
-
-    let outcome: Result<(String, TokenUsage), String> = if is_deepseek(&resolved) {
-        deepseek::extract_text(
-            client,
-            image_base64,
-            &system_prompt,
-            &resolved.api_key,
-            &resolved.model,
-            &resolved.base_url,
-            thinking,
-            config.voice_templates.deepseek_reasoning_effort.as_deref(),
-        )
-        .await
-    } else {
-        match resolved.protocol.as_str() {
-            "gemini" => {
-                gemini::extract_text(
-                    client,
-                    image_base64,
-                    &system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                    thinking,
-                )
-                .await
-            }
-            "qwen-omni" => {
-                openai_compat::qwen_omni_extract_text(
-                    client,
-                    image_base64,
-                    &system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                )
-                .await
-            }
-            "mimo" => {
-                mimo::extract_text(
-                    client,
-                    image_base64,
-                    &system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                )
-                .await
-            }
-            PROTOCOL_BEDROCK => {
-                bedrock::extract_text(
-                    &config.models.aws,
-                    image_base64,
-                    &system_prompt,
-                    &resolved.model,
-                    thinking,
-                )
-                .await
-            }
-            PROTOCOL_AWS_TRANSCRIBE => {
-                Err("Amazon Transcribe 只能做语音转写，不能识别图像".to_string())
-            }
-            _ => {
-                openai_compat::extract_text(
-                    client,
-                    image_base64,
-                    &system_prompt,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &resolved.base_url,
-                    resolved.chat_template_kwargs.as_ref(),
-                    Some(thinking),
-                )
-                .await
-            }
-        }
-    };
-
-    if let Ok((_, usage)) = &outcome {
-        record_usage("extract", &resolved, *usage);
-    }
-    outcome.map(|(text, _)| text)
+    let (text, usage) = bedrock::extract_text(
+        &config.models.aws,
+        image_base64,
+        &system_prompt,
+        &resolved.model,
+        extract_thinking(config),
+    )
+    .await?;
+    record_usage("extract", &resolved, usage);
+    Ok(text)
 }
 
-/// 文本类调用的 provider 分发：优化、自动学习、会议总结都走这里。
+/// 文本类调用：优化、自动学习、会议纪要都走这里。
 async fn run_text(
-    client: &reqwest::Client,
     text: &str,
     system_prompt: &str,
     config: &AppConfig,
     resolved: &models::ResolvedModel,
     thinking: &ThinkingConfig,
-    deepseek_effort: Option<&str>,
+    what_key: &str,
 ) -> Result<(String, TokenUsage), String> {
-    if is_deepseek(resolved) {
-        return deepseek::optimize(
-            client,
-            text,
-            system_prompt,
-            &resolved.api_key,
-            &resolved.model,
-            &resolved.base_url,
-            thinking,
-            deepseek_effort,
-        )
-        .await;
-    }
-    match resolved.protocol.as_str() {
-        "gemini" => {
-            gemini::optimize(
-                client,
-                text,
-                system_prompt,
-                &resolved.api_key,
-                &resolved.model,
-                &resolved.base_url,
-                thinking,
-            )
-            .await
-        }
-        "qwen-omni" => {
-            openai_compat::qwen_omni_optimize(
-                client,
-                text,
-                system_prompt,
-                &resolved.api_key,
-                &resolved.model,
-                &resolved.base_url,
-            )
-            .await
-        }
-        "mimo" => {
-            mimo::optimize(
-                client,
-                text,
-                system_prompt,
-                &resolved.api_key,
-                &resolved.model,
-                &resolved.base_url,
-            )
-            .await
-        }
-        PROTOCOL_BEDROCK => {
-            bedrock::optimize(
-                &config.models.aws,
-                text,
-                system_prompt,
-                &resolved.model,
-                thinking,
-            )
-            .await
-        }
-        PROTOCOL_AWS_TRANSCRIBE => {
-            Err("Amazon Transcribe 只能做语音转写，不能处理文本".to_string())
-        }
-        _ => {
-            openai_compat::optimize(
-                client,
-                text,
-                system_prompt,
-                &resolved.api_key,
-                &resolved.model,
-                &resolved.base_url,
-                resolved.chat_template_kwargs.as_ref(),
-                Some(thinking),
-            )
-            .await
-        }
-    }
+    require_bedrock(resolved, what_key)?;
+    bedrock::optimize(
+        &config.models.aws,
+        text,
+        system_prompt,
+        &resolved.model,
+        thinking,
+    )
+    .await
 }
 
-/// Optimize text using the configured provider.
+/// Optimize text using the configured Bedrock model.
 pub async fn optimize(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     text: &str,
     config: &AppConfig,
     prompts_dir: &Path,
@@ -389,53 +185,33 @@ pub async fn optimize(
     }
 
     let resolved = models::resolve_model(config, &config.voice_templates.model_id)?;
-    let outcome = run_text(
-        client,
+    let (text, usage) = run_text(
         text,
         &system_prompt,
         config,
         &resolved,
         &config.voice_templates.thinking,
-        config.voice_templates.deepseek_reasoning_effort.as_deref(),
+        "what.optimize",
     )
-    .await;
-
-    match outcome {
-        Ok((text, usage)) => {
-            record_usage("optimize", &resolved, usage);
-            Ok(ai_output(text, &resolved))
-        }
-        Err(e) => Err(e),
-    }
+    .await?;
+    record_usage("optimize", &resolved, usage);
+    Ok(ai_output(text, &resolved))
 }
 
-/// 用指定文本模型跑一段系统提示词 + 输入，返回纯文本。自动学习、会议总结共用。
-#[allow(clippy::too_many_arguments)]
+/// 用指定文本模型跑一段系统提示词 + 输入，返回纯文本。自动学习、会议纪要共用。
 pub async fn complete_text(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     input: &str,
     system_prompt: &str,
     config: &AppConfig,
     model_id: &str,
     thinking: &ThinkingConfig,
-    deepseek_effort: Option<&str>,
     scene: &str,
 ) -> Result<String, String> {
     let resolved = models::resolve_model(config, model_id)?;
-    let outcome = run_text(
-        client,
-        input,
-        system_prompt,
-        config,
-        &resolved,
-        thinking,
-        deepseek_effort,
-    )
-    .await;
-    if let Ok((_, usage)) = &outcome {
-        record_usage(scene, &resolved, *usage);
-    }
-    outcome.map(|(text, _)| text)
+    let (text, usage) = run_text(input, system_prompt, config, &resolved, thinking, "what.text").await?;
+    record_usage(scene, &resolved, usage);
+    Ok(text)
 }
 
 /// Analyze a user correction using the configured learning model.
@@ -452,7 +228,6 @@ pub async fn analyze_correction(
         config,
         &config.voice_learning.model_id,
         &config.voice_learning.thinking,
-        config.voice_learning.deepseek_reasoning_effort.as_deref(),
         "learn",
     )
     .await
@@ -460,8 +235,7 @@ pub async fn analyze_correction(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_thinking;
-    use crate::config::types::{AppConfig, ThinkingConfig};
+    use super::*;
 
     fn thinking(enabled: bool) -> ThinkingConfig {
         ThinkingConfig {
@@ -486,5 +260,30 @@ mod tests {
         config.voice_templates.thinking = thinking(true);
 
         assert!(!extract_thinking(&config).enabled);
+    }
+
+    #[test]
+    fn extract_model_falls_back_to_text_model_not_transcribe() {
+        let mut config = AppConfig::default();
+        config.extract.model_id = None;
+        config.voice_templates.model_id = "builtin-bedrock-claude-haiku-4-5".to_string();
+        assert_eq!(extract_model_id(&config), "builtin-bedrock-claude-haiku-4-5");
+
+        config.voice_templates.model_id = String::new();
+        assert_eq!(extract_model_id(&config), models::DEFAULT_TEXT_MODEL);
+
+        config.extract.model_id = Some("builtin-bedrock-claude-opus-5".to_string());
+        assert_eq!(extract_model_id(&config), "builtin-bedrock-claude-opus-5");
+    }
+
+    #[test]
+    fn non_bedrock_models_are_rejected_for_text() {
+        let config = AppConfig::default();
+        let resolved = models::resolve_model(&config, models::DEFAULT_TRANSCRIBE_MODEL).unwrap();
+        let error = require_bedrock(&resolved, "what.optimize").unwrap_err();
+        // 用途名已经翻译进句子里，不会把 key 原样漏给用户
+        assert!(!error.contains("what.optimize"), "{error}");
+        let claude = models::resolve_model(&config, models::DEFAULT_TEXT_MODEL).unwrap();
+        assert!(require_bedrock(&claude, "what.optimize").is_ok());
     }
 }

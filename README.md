@@ -3,13 +3,13 @@
 **告别打字，用说的。**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20iOS-brightgreen?style=flat-square)](https://github.com/devonmochi/byetype/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-brightgreen?style=flat-square)](https://github.com/devonmochi/byetype/releases)
 
 ByeType 是一个 Markdown 驱动的 AI 语音输入工具。按 F4 说话，文字经转写、润色、格式化后自动落到光标位置。识别规则、专有词汇和输出风格都写在可编辑的 Markdown 提示词里，行业术语和个人说法一次调对。
 
 它还支持**截图取字**：按 F6 框选屏幕任意区域，AI 理解版式后提取文字并复制到剪贴板。终端和 PDF 阅读器里的文字常常因为行号、分屏、硬换行被切碎，ByeType 能还原成可直接使用的完整段落。
 
-免费开源，使用你自己的 API Key。语音和截图只发送到你选择的服务商，ByeType 本身不收费、不经手数据。支持 macOS、Windows 桌面端，以及 iPhone / iPad（通过 iOS 快捷指令）。
+免费开源，使用你自己的 AWS 账号：语音交给 Amazon Transcribe 识别，文本与截图交给 Amazon Bedrock 上的 Claude 处理，ByeType 本身不收费、不经手数据。支持 macOS、Windows 桌面端。
 
 ![录音 → 转写 → 优化 → 自动粘贴](docs/images/demo.gif)
 
@@ -24,11 +24,18 @@ ByeType 是一个 Markdown 驱动的 AI 语音输入工具。按 F4 说话，文
 | 多场景切换 | **快捷键配模板，一键换风格** | 不支持 | 不支持 |
 | 中英混合 | **优秀** | 差 | 一般 |
 
-> **核心区别**：Whisper 类方案是「ASR 转文字 + LLM 后处理」两步架构，第一步转错的内容，第二步也救不回来。ByeType 用多模态大模型直接处理原始音频，所有提示词规则在转写时一次生效，没有「先错后纠」的问题。
+> **这个分支的架构**：语音由 Amazon Transcribe 流式识别（支持中英混合、说话人分离），再由 Bedrock 上的 Claude 按你写的转录规则、专有词汇和自动学习结果统一纠错、排版。所有提示词都在文本阶段生效。
 
 ## 🤖 支持的模型
 
-预置 5 个模型：Qwen 3.5 Omni Plus / Flash 和 MiMo v2.5 走国内直连，Gemini 3.8 Flash 需要代理，DeepSeek V4.1 Flash 只做文本优化和截图取字。所有模型在「设置 → 模型管理」里填自己的 API Key。无法直接访问 Google 时，可以换成 OpenRouter 中转的 `google/gemini-3.8-flash` 或 `google/gemini-3.5-flash-lite`。
+只接 AWS，不需要 API Key，凭证来自本机 `~/.aws/config` 里的 profile（ADA `credential_process`、静态 key、SSO 均可）：
+
+| 用途 | 服务 | 预置模型 |
+|---|---|---|
+| 语音转写 | Amazon Transcribe（流式） | 自动识别中文 + 英文，或指定单一语言 |
+| 文本优化、截图取字、自动学习、会议纪要 | Amazon Bedrock | Claude Sonnet 5、Opus 5、Haiku 4.5（`global.*` 跨区推理配置） |
+
+在「设置 → 模型管理」里分别填 Bedrock 与 Transcribe 的 AWS Profile / Region（同一个角色可能只授权其中一个服务），还可以添加任意 Bedrock 模型或推理配置 id 作为自定义模型。
 
 ## 🔬 真实效果对比
 
@@ -142,7 +149,7 @@ ByeType 会对比你的原始转写和你修改后粘贴的文本，找出差异
 
 ### 本机 HTTP 接口
 
-在「设置 → 通用设置 → 网络与性能」中首次开启本机转写接口后，其他本机程序可以复用 ByeType 当前的模型、代理、专有词汇、转写规则和语音模板。接口只监听 `127.0.0.1`，不会开放给局域网设备。
+在「设置 → 通用设置 → 网络与性能」中首次开启本机转写接口后，其他本机程序可以复用 ByeType 当前的模型、专有词汇、转写规则和语音模板。接口只监听 `127.0.0.1`，不会开放给局域网设备。
 
 处理音频文件：
 
@@ -170,17 +177,11 @@ some-audio-command | curl -fsS -X POST \
 
 ### 备份与恢复
 
-「设置 → 备份与恢复」支持把全部配置（API Key、提示词、学习结果、快捷键）备份到 S3 兼容存储，换电脑或重装系统时一键恢复。
+「设置 → 备份与恢复」支持把全部配置（AWS profile 设置、提示词、学习结果、快捷键）备份到 S3 兼容存储，换电脑或重装系统时一键恢复。
 
-### 📱 iPhone / iPad
+### 🎙️ 会议记录（Zoom）
 
-通过 iOS 快捷指令，在手机和平板上也能获得和桌面版一样的自定义词汇和转录效果。
-
-| 快捷指令 | 模型 | 安装 |
-|---------|------|------|
-| ByeType Gemini | Gemini 3.1 Flash Lite | [添加到快捷指令](https://www.icloud.com/shortcuts/85403a4e55a0487c985109f944f46ae8) |
-
-> 安装后需要在快捷指令中填写你自己的 API Key 和规则词汇等，和桌面版共用同一个 Key。
+在「设置 → 会议记录」启用后，检测到 Zoom 开会会自动开始录制麦克风和系统音频（macOS 14.2+，需要「仅系统音频录制」权限），按段送 Amazon Transcribe 转写并区分说话人；会议结束后由 Claude 生成结构化纪要（概述、主题要点、后续行动、已定事项），连同逐字转写导出成 Markdown 到你指定的笔记目录（可指向 Obsidian vault）。托盘菜单也可以手动开始 / 停止录制，会议窗口能实时查看转写、编辑纪要。
 
 ## ❓ 常见问题
 
@@ -207,32 +208,23 @@ some-audio-command | curl -fsS -X POST \
 
 - 检查「设置 → 图像识别设置」里选的模型是否支持截图取字，见上文「支持的模型」
 - 框选时按 Esc 会取消这次截图，不会产生结果
-- 确认 API Key 有效、网络可达
+- 确认 AWS 凭证有效（模型管理里点「测试」）、网络可达
 </details>
 
 <details>
-<summary><b>转写结果为空</b></summary>
+<summary><b>转写结果为空或提示 AWS 凭证不可用</b></summary>
 
-- 检查 API Key 是否正确填写
-- 检查网络连接是否正常
-- 如果使用 Gemini 模型，确认能访问 Google 服务（或已配置代理）
+- 在「设置 → 模型管理」点「测试」确认 profile / region 正确
+- ADA 凭证依赖 Midway，过期时在终端运行 `mwinit -o`
+- Transcribe 与 Bedrock 可能需要不同的 profile，同一个角色未必两个服务都授权
 </details>
 
 <details>
 <summary><b>转写速度慢</b></summary>
 
-- 关闭思考（设置 → 转写设置 → 启用思考 → 关闭）
-- 切换更轻量的模型，比如 OpenRouter 的 `google/gemini-3.5-flash-lite`
-- 检查网络延迟
-</details>
-
-<details>
-<summary><b>国内网络无法使用 Gemini 模型</b></summary>
-
-两种方案：
-
-1. 在「设置 → 语音转写」中选择 Qwen 3.5 Omni 等国内直连模型，无需代理
-2. 在「设置 → 通用设置 → 网络与性能 → HTTP 代理地址」中配置代理后使用 Gemini
+- 关闭文本优化的思考（设置 → 转写设置 → 启用思考 → 关闭）
+- 文本优化换成 Claude Haiku 4.5
+- Transcribe 的耗时大致与音频时长同量级，长录音请把「通用设置」里的转写超时调大
 </details>
 
 ## 🏗️ 技术栈
@@ -243,7 +235,7 @@ some-audio-command | curl -fsS -X POST \
 | 前端 | [React](https://react.dev/) 19 + TypeScript + [Vite](https://vite.dev/) |
 | 后端 | Rust（cpal 音频采集、flacenc 编码） |
 | 编辑器 | [CodeMirror](https://codemirror.net/) 6 |
-| AI | Google Gemini API、阿里云百炼 DashScope API、OpenAI 兼容 API |
+| AI | Amazon Transcribe（流式转写）、Amazon Bedrock Converse API（Claude），经 AWS SDK for Rust 调用 |
 
 ## 📄 许可证
 

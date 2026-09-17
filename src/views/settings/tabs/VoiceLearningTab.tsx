@@ -1,29 +1,16 @@
-import type { AppConfig } from '../../../core/types'
-import { findModel, getTextModels, supportsMinimalThinking } from '../../../core/models'
+import { useMemo } from 'react'
+import type { AppConfig, ThinkingConfig } from '../../../core/types'
+import { getTextModels } from '../../../core/models'
 import {
   getVoiceLearningDocument,
   getVoiceLearningPromptPath,
   saveVoiceLearningDocument,
 } from '../../../lib/tauri-api'
+import { t, useLang } from '../../../i18n'
 import { PromptEditor, type PromptFileEntry } from '../components/PromptEditor'
 import { SettingGroup } from '../components/SettingGroup'
 import { SettingRow } from '../components/SettingRow'
 import { Toggle } from '../components/Toggle'
-
-const LEARNING_FILES: PromptFileEntry[] = [
-  {
-    key: 'voice-learning-prompt',
-    label: '学习提示词',
-    resolvePath: getVoiceLearningPromptPath,
-  },
-  {
-    key: 'voice-learning-result',
-    label: '学习结果',
-    loadContent: getVoiceLearningDocument,
-    saveContent: saveVoiceLearningDocument,
-    refreshEvent: 'voice-learning-updated',
-  },
-]
 
 interface Props {
   config: AppConfig
@@ -31,19 +18,26 @@ interface Props {
 }
 
 export function VoiceLearningTab({ config, onSave }: Props) {
+  const lang = useLang()
   const textModels = getTextModels(config)
   const builtinModels = textModels.filter(model => model.builtin)
   const customModels = textModels.filter(model => !model.builtin)
-  const selectedModel = findModel(config, config.voiceLearning.modelId)
-  const isOpenRouter = selectedModel?.protocol === 'openai-compat'
-    && (selectedModel.baseUrl?.includes('openrouter.ai') ?? false)
-  const isGemini = selectedModel?.protocol === 'gemini' || isOpenRouter
-  // Gemini 3.7 系列不支持 MINIMAL 思考档位，隐藏该选项并按 LOW 显示
-  const supportsMinimal = supportsMinimalThinking(selectedModel?.model)
-  const isDeepSeek = selectedModel?.protocol === 'openai-compat'
-    && (selectedModel.baseUrl?.includes('api.deepseek.com') ?? false)
-  // Bedrock 上的 Claude 走扩展思考，LOW / MEDIUM / HIGH 对应不同思考预算，没有 MINIMAL
-  const isBedrock = selectedModel?.protocol === 'bedrock'
+
+  // label 随语言变化，其余字段不变；按 lang 记忆化以保持 promptFiles 引用稳定
+  const learningFiles = useMemo<PromptFileEntry[]>(() => [
+    {
+      key: 'voice-learning-prompt',
+      label: t('learningTab.file.prompt'),
+      resolvePath: getVoiceLearningPromptPath,
+    },
+    {
+      key: 'voice-learning-result',
+      label: t('learningTab.file.result'),
+      loadContent: getVoiceLearningDocument,
+      saveContent: saveVoiceLearningDocument,
+      refreshEvent: 'voice-learning-updated',
+    },
+  ], [lang])
 
   const updateModel = (modelId: string) => {
     onSave({
@@ -52,7 +46,7 @@ export function VoiceLearningTab({ config, onSave }: Props) {
     })
   }
 
-  const updateThinking = (changes: Partial<AppConfig['voiceLearning']['thinking']>) => {
+  const updateThinking = (changes: Partial<ThinkingConfig>) => {
     onSave({
       ...config,
       voiceLearning: {
@@ -62,32 +56,25 @@ export function VoiceLearningTab({ config, onSave }: Props) {
     })
   }
 
-  const updateDeepSeekEffort = (deepseekReasoningEffort: 'low' | 'high' | 'max') => {
-    onSave({
-      ...config,
-      voiceLearning: { ...config.voiceLearning, deepseekReasoningEffort },
-    })
-  }
-
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
-      <h2 className="content-title" style={{ flexShrink: 0 }}>自动学习</h2>
+      <h2 className="content-title" style={{ flexShrink: 0 }}>{t('learningTab.title')}</h2>
 
-      <SettingGroup title="模型">
-        <SettingRow label="学习模型" description="用于对比原始转写与用户修改文本，并归纳纠错规则">
+      <SettingGroup title={t('learningTab.group.model')}>
+        <SettingRow label={t('learningTab.model')} description={t('learningTab.modelDesc')}>
           <select
             className="select"
             value={config.voiceLearning.modelId}
             onChange={event => updateModel(event.target.value)}
             style={{ width: 260 }}
           >
-            <optgroup label="预置模型">
+            <optgroup label={t('common.builtinModels')}>
               {builtinModels.map(model => (
                 <option key={model.id} value={model.id}>{model.provider} - {model.model}</option>
               ))}
             </optgroup>
             {customModels.length > 0 && (
-              <optgroup label="自定义模型">
+              <optgroup label={t('common.customModels')}>
                 {customModels.map(model => (
                   <option key={model.id} value={model.id}>{model.provider} - {model.model}</option>
                 ))}
@@ -95,47 +82,30 @@ export function VoiceLearningTab({ config, onSave }: Props) {
             )}
           </select>
         </SettingRow>
-        {(isGemini || isDeepSeek || isBedrock) && (
-          <SettingRow label="启用思考" description="让模型在归纳纠错规则前先进行推理">
-            <Toggle
-              checked={config.voiceLearning.thinking.enabled}
-              onChange={enabled => updateThinking({ enabled })}
-            />
-          </SettingRow>
-        )}
-        {(isGemini || isBedrock) && config.voiceLearning.thinking.enabled && (
-          <SettingRow label="Thinking Level" description="思考深度级别">
+        <SettingRow label={t('common.thinking.enable')} description={t('learningTab.thinkingDesc')}>
+          <Toggle
+            checked={config.voiceLearning.thinking.enabled}
+            onChange={enabled => updateThinking({ enabled })}
+          />
+        </SettingRow>
+        {config.voiceLearning.thinking.enabled && (
+          <SettingRow label={t('common.thinking.level')} description={t('common.thinking.levelDesc')}>
             <select
               className="select"
-              value={(supportsMinimal && !isBedrock) || config.voiceLearning.thinking.level !== 'MINIMAL' ? config.voiceLearning.thinking.level : 'LOW'}
-              onChange={event => updateThinking({ level: event.target.value as AppConfig['voiceLearning']['thinking']['level'] })}
+              value={config.voiceLearning.thinking.level}
+              onChange={event => updateThinking({ level: event.target.value as ThinkingConfig['level'] })}
               style={{ width: 120 }}
             >
-              {supportsMinimal && !isBedrock && <option value="MINIMAL">MINIMAL</option>}
               <option value="LOW">LOW</option>
               <option value="MEDIUM">MEDIUM</option>
               <option value="HIGH">HIGH</option>
             </select>
           </SettingRow>
         )}
-        {isDeepSeek && config.voiceLearning.thinking.enabled && (
-          <SettingRow label="Reasoning Effort" description="DeepSeek思考强度，low更快，max更深">
-            <select
-              className="select"
-              value={config.voiceLearning.deepseekReasoningEffort ?? 'high'}
-              onChange={event => updateDeepSeekEffort(event.target.value as 'low' | 'high' | 'max')}
-              style={{ width: 120 }}
-            >
-              <option value="low">low</option>
-              <option value="high">high</option>
-              <option value="max">max</option>
-            </select>
-          </SettingRow>
-        )}
       </SettingGroup>
 
-      <h3 className="section-title">学习文档</h3>
-      <PromptEditor config={config} onSave={onSave} promptFiles={LEARNING_FILES} editorHeight={320} />
+      <h3 className="section-title">{t('learningTab.docsSection')}</h3>
+      <PromptEditor config={config} onSave={onSave} promptFiles={learningFiles} editorHeight={320} />
     </div>
   )
 }

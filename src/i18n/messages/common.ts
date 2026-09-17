@@ -1,0 +1,43 @@
+import type { MessageBundle } from '../types'
+
+// 区域：common。跨窗口复用的通用按钮 / 状态词。
+export const common: MessageBundle = {
+  zh: {
+    'common.save': '保存',
+    'common.cancel': '取消',
+    'common.delete': '删除',
+    'common.edit': '编辑',
+    'common.copy': '复制',
+    'common.close': '关闭',
+    'common.open': '打开',
+    'common.retry': '重试',
+    'common.loading': '加载中…',
+    'common.saved': '已保存',
+    'common.failed': '失败',
+    'common.builtinModels': '预置模型',
+    'common.customModels': '自定义模型',
+    'common.thinking.enable': '启用思考',
+    'common.thinking.level': 'Thinking Level',
+    'common.thinking.levelDesc': '思考深度级别',
+    'common.confirmDelete': '确定删除？',
+  },
+  en: {
+    'common.save': 'Save',
+    'common.cancel': 'Cancel',
+    'common.delete': 'Delete',
+    'common.edit': 'Edit',
+    'common.copy': 'Copy',
+    'common.close': 'Close',
+    'common.open': 'Open',
+    'common.retry': 'Retry',
+    'common.loading': 'Loading…',
+    'common.saved': 'Saved',
+    'common.failed': 'Failed',
+    'common.builtinModels': 'Built-in models',
+    'common.customModels': 'Custom models',
+    'common.thinking.enable': 'Enable thinking',
+    'common.thinking.level': 'Thinking level',
+    'common.thinking.levelDesc': 'How deeply the model reasons',
+    'common.confirmDelete': 'Delete this?',
+  },
+}

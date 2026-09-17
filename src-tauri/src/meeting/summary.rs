@@ -90,7 +90,6 @@ async fn run(
         config,
         model_id,
         &config.meeting.summary_thinking,
-        None,
         USAGE_SCENE,
     )
     .await
@@ -185,8 +184,8 @@ mod tests {
         assert_eq!(summary_model_id(&config), "builtin-bedrock-claude-sonnet-5");
 
         config.meeting.summary_model_id = "not-a-model".to_string();
-        config.voice_templates.model_id = "builtin-gemini-3.8-flash".to_string();
-        assert_eq!(summary_model_id(&config), "builtin-gemini-3.8-flash");
+        config.voice_templates.model_id = "builtin-bedrock-claude-haiku-4-5".to_string();
+        assert_eq!(summary_model_id(&config), "builtin-bedrock-claude-haiku-4-5");
 
         config.voice_templates.model_id = "builtin-aws-transcribe".to_string();
         assert_eq!(summary_model_id(&config), config.voice_learning.model_id);

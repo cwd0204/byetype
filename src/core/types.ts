@@ -1,4 +1,6 @@
 export type ThemeMode = 'light' | 'dark' | 'system'
+/** 界面语言：跟随系统 / 中文 / 英文 */
+export type LanguageSetting = 'system' | 'zh-CN' | 'en'
 
 export interface AudioDevice {
   name: string
@@ -10,6 +12,7 @@ export interface GeneralConfig {
   shortcut2: string
   launchAtLogin: boolean
   theme: ThemeMode
+  language: LanguageSetting
   maxRecordingSeconds: number
   microphone: string
   extractShortcut: string
@@ -39,29 +42,17 @@ export interface LocalApiStatus {
 
 export interface ThinkingConfig {
   enabled: boolean
-  level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH'
+  level: 'LOW' | 'MEDIUM' | 'HIGH'
 }
 
+/** 用户自建的 Bedrock 模型：只需要模型 / 推理配置 id 与能力标记，凭证走 AWS profile */
 export interface CustomModelEntry {
   id: string
   provider: string
   model: string
-  protocol: 'gemini' | 'openai-compat' | 'qwen-omni' | 'mimo' | 'bedrock' | 'aws-transcribe'
-  baseUrl: string
-  apiKey: string
-  audioInputMode: 'input_audio' | 'audio_url'
-  chatTemplateKwargs: Record<string, unknown>
-  supportsAudio: boolean
+  protocol: 'bedrock'
   supportsText: boolean
   supportsVision: boolean
-}
-
-export interface BuiltinApiKeys {
-  gemini: string
-  deepseek: string
-  dashscope: string
-  openrouter: string
-  mimo: string
 }
 
 /**
@@ -79,7 +70,6 @@ export interface AwsConfig {
 }
 
 export interface ModelsConfig {
-  builtinApiKeys: BuiltinApiKeys
   custom: CustomModelEntry[]
   aws: AwsConfig
 }
@@ -93,7 +83,6 @@ export interface TranscribeConfig {
 export interface VoiceLearningConfig {
   modelId: string
   thinking: ThinkingConfig
-  deepseekReasoningEffort?: 'low' | 'high' | 'max'
 }
 
 export interface TemplateEntry {
@@ -106,8 +95,6 @@ export interface VoiceTemplatesConfig {
   modelId: string
   thinking: ThinkingConfig
   templates: TemplateEntry[]
-  /** DeepSeek 专用 reasoning_effort,取值 'low' | 'high' | 'max'。仅在选中 DeepSeek 模型且 thinking.enabled=true 时生效 */
-  deepseekReasoningEffort?: 'low' | 'high' | 'max'
   /** 优化阶段是否再带一遍转写参考（专有词汇/转写规则/学习结果）做二次纠错。弱模型建议开启，强模型默认关闭 */
   reuseTranscribeReferences?: boolean
 }

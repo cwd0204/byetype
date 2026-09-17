@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { AppConfig, AudioDevice, LocalApiStatus, ThemeMode } from '../../../core/types'
+import { AppConfig, AudioDevice, LanguageSetting, LocalApiStatus, ThemeMode } from '../../../core/types'
 import {
   getLaunchAtLogin,
   getLocalApiStatus,
@@ -7,16 +7,18 @@ import {
   setLaunchAtLogin,
   listInputDevices,
 } from '../../../lib/tauri-api'
+import { t, useLang } from '../../../i18n'
 import { SettingGroup } from '../components/SettingGroup'
 import { SettingRow } from '../components/SettingRow'
 import { Toggle } from '../components/Toggle'
 import { EditableLabel } from '../components/EditableLabel'
 
-const DEFAULT_LABELS = {
-  shortcut: '语音输入 1',
-  shortcut2: '语音输入 2',
-  extractShortcut: '截图取词',
-  extractShortcut2: '截图翻译',
+// 快捷键行的默认显示名（文案 key，渲染时按当前语言取）
+const DEFAULT_LABEL_KEYS = {
+  shortcut: 'general.defaultLabel.shortcut',
+  shortcut2: 'general.defaultLabel.shortcut2',
+  extractShortcut: 'general.defaultLabel.extractShortcut',
+  extractShortcut2: 'general.defaultLabel.extractShortcut2',
 } as const
 
 const IS_MACOS = navigator.platform.toUpperCase().includes('MAC')
@@ -35,6 +37,7 @@ interface Props {
 }
 
 export function GeneralTab({ config, onSave }: Props) {
+  useLang()
   const [recording, setRecording] = useState(false)
   const [recording2, setRecording2] = useState(false)
   const [recordingExtract, setRecordingExtract] = useState(false)
@@ -105,11 +108,18 @@ export function GeneralTab({ config, onSave }: Props) {
 
   const curlCommand = `curl -fsS -X POST --data-binary @recording.m4a -H 'Content-Type: audio/mp4' 'http://127.0.0.1:${config.localApi.port}/transcribe'`
 
+  const defaultLabels = {
+    shortcut: t(DEFAULT_LABEL_KEYS.shortcut),
+    shortcut2: t(DEFAULT_LABEL_KEYS.shortcut2),
+    extractShortcut: t(DEFAULT_LABEL_KEYS.extractShortcut),
+    extractShortcut2: t(DEFAULT_LABEL_KEYS.extractShortcut2),
+  }
+
   const labelOf = {
-    shortcut: config.general.shortcutLabel?.trim() || DEFAULT_LABELS.shortcut,
-    shortcut2: config.general.shortcut2Label?.trim() || DEFAULT_LABELS.shortcut2,
-    extractShortcut: config.general.extractShortcutLabel?.trim() || DEFAULT_LABELS.extractShortcut,
-    extractShortcut2: config.general.extractShortcut2Label?.trim() || DEFAULT_LABELS.extractShortcut2,
+    shortcut: config.general.shortcutLabel?.trim() || defaultLabels.shortcut,
+    shortcut2: config.general.shortcut2Label?.trim() || defaultLabels.shortcut2,
+    extractShortcut: config.general.extractShortcutLabel?.trim() || defaultLabels.extractShortcut,
+    extractShortcut2: config.general.extractShortcut2Label?.trim() || defaultLabels.extractShortcut2,
   }
 
   function createKeyHandler(
@@ -137,7 +147,7 @@ export function GeneralTab({ config, onSave }: Props) {
 
       const conflict = others.find(o => o.key === combo)
       if (conflict) {
-        setConflictMsg(`\u4E0E${conflict.label}\u51B2\u7A81`)
+        setConflictMsg(t('general.conflictWith', { label: conflict.label }))
         setTimeout(() => setConflictMsg(''), 3000)
         setRec(false)
         return
@@ -189,51 +199,63 @@ export function GeneralTab({ config, onSave }: Props) {
   )
 
   const themes: { value: ThemeMode; label: string; style: React.CSSProperties }[] = [
-    { value: 'light', label: '浅色', style: { background: '#ffffff', border: '1px solid #d2d2d7' } },
-    { value: 'dark', label: '深色', style: { background: '#1c1c1e' } },
-    { value: 'system', label: '自动', style: { background: 'linear-gradient(to right, #ffffff 50%, #1c1c1e 50%)' } },
+    { value: 'light', label: t('general.theme.light'), style: { background: '#ffffff', border: '1px solid #d2d2d7' } },
+    { value: 'dark', label: t('general.theme.dark'), style: { background: '#1c1c1e' } },
+    { value: 'system', label: t('general.theme.system'), style: { background: 'linear-gradient(to right, #ffffff 50%, #1c1c1e 50%)' } },
   ]
 
   return (
     <div>
-      <h2 className="content-title">通用设置</h2>
+      <h2 className="content-title">{t('general.title')}</h2>
 
-      <SettingGroup title="外观">
+      <SettingGroup title={t('general.group.appearance')}>
         <div style={{ padding: '12px 16px' }}>
           <div className="appearance-options">
-            {themes.map(t => (
+            {themes.map(theme => (
               <button
-                key={t.value}
-                className={`appearance-option${config.general.theme === t.value ? ' active' : ''}`}
-                onClick={() => update({ theme: t.value })}
+                key={theme.value}
+                className={`appearance-option${config.general.theme === theme.value ? ' active' : ''}`}
+                onClick={() => update({ theme: theme.value })}
               >
-                <div className="appearance-preview" style={t.style} />
-                <div className="appearance-label">{t.label}</div>
+                <div className="appearance-preview" style={theme.style} />
+                <div className="appearance-label">{theme.label}</div>
               </button>
             ))}
           </div>
         </div>
+        <SettingRow label={t('general.language')} description={t('general.languageDesc')}>
+          <select
+            className="select"
+            value={config.general.language ?? 'system'}
+            onChange={e => update({ language: e.target.value as LanguageSetting })}
+            style={{ width: 200 }}
+          >
+            <option value="system">{t('general.languageSystem')}</option>
+            <option value="zh-CN">中文</option>
+            <option value="en">English</option>
+          </select>
+        </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="语音输入">
+      <SettingGroup title={t('general.group.voice')}>
         <SettingRow label={
           <EditableLabel
             value={labelOf.shortcut}
-            defaultValue={DEFAULT_LABELS.shortcut}
+            defaultValue={defaultLabels.shortcut}
             onChange={next => update({ shortcutLabel: next })}
           />
         }>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>输出风格</span>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('general.outputStyle')}</span>
             <select
               className="select"
               value={config.general.shortcutTemplate}
               onChange={e => update({ shortcutTemplate: e.target.value })}
               style={{ minWidth: 100 }}
             >
-              <option value="">无</option>
-              {config.voiceTemplates.templates.map(t => (
-                <option key={t.id} value={t.id}>{t.name}</option>
+              <option value="">{t('general.none')}</option>
+              {config.voiceTemplates.templates.map(tpl => (
+                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
             <input
@@ -250,21 +272,21 @@ export function GeneralTab({ config, onSave }: Props) {
         <SettingRow label={
           <EditableLabel
             value={labelOf.shortcut2}
-            defaultValue={DEFAULT_LABELS.shortcut2}
+            defaultValue={defaultLabels.shortcut2}
             onChange={next => update({ shortcut2Label: next })}
           />
         }>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>输出风格</span>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('general.outputStyle')}</span>
             <select
               className="select"
               value={config.general.shortcut2Template}
               onChange={e => update({ shortcut2Template: e.target.value })}
               style={{ minWidth: 100 }}
             >
-              <option value="">无</option>
-              {config.voiceTemplates.templates.map(t => (
-                <option key={t.id} value={t.id}>{t.name}</option>
+              <option value="">{t('general.none')}</option>
+              {config.voiceTemplates.templates.map(tpl => (
+                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
             <input
@@ -278,15 +300,15 @@ export function GeneralTab({ config, onSave }: Props) {
             />
           </div>
         </SettingRow>
-        <SettingRow label="按住说话模式" description="开启后按住快捷键期间录音，松开立即识别">
+        <SettingRow label={t('general.pttMode')} description={t('general.pttModeDesc')}>
           <Toggle
             checked={!!config.general.pttMode}
             onChange={checked => update({ pttMode: checked })}
           />
         </SettingRow>
         <SettingRow
-          label="覆盖剪贴板"
-          description="开启后识别结果会写入剪贴板，覆盖你之前复制的内容；关闭后识别完成会自动还原原剪贴板"
+          label={t('general.overwriteClipboard')}
+          description={t('general.overwriteClipboardDesc')}
         >
           <Toggle
             checked={config.general.overwriteClipboard !== false}
@@ -295,24 +317,24 @@ export function GeneralTab({ config, onSave }: Props) {
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="图像识别">
+      <SettingGroup title={t('general.group.extract')}>
         <SettingRow label={
           <EditableLabel
             value={labelOf.extractShortcut}
-            defaultValue={DEFAULT_LABELS.extractShortcut}
+            defaultValue={defaultLabels.extractShortcut}
             onChange={next => update({ extractShortcutLabel: next })}
           />
         }>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>输出风格</span>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('general.outputStyle')}</span>
             <select
               className="select"
               value={config.general.extractShortcutTemplate}
               onChange={e => update({ extractShortcutTemplate: e.target.value })}
               style={{ minWidth: 100 }}
             >
-              {config.extract.templates.map(t => (
-                <option key={t.id} value={t.id}>{t.name}</option>
+              {config.extract.templates.map(tpl => (
+                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
             <input
@@ -329,20 +351,20 @@ export function GeneralTab({ config, onSave }: Props) {
         <SettingRow label={
           <EditableLabel
             value={labelOf.extractShortcut2}
-            defaultValue={DEFAULT_LABELS.extractShortcut2}
+            defaultValue={defaultLabels.extractShortcut2}
             onChange={next => update({ extractShortcut2Label: next })}
           />
         }>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>输出风格</span>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('general.outputStyle')}</span>
             <select
               className="select"
               value={config.general.extractShortcut2Template}
               onChange={e => update({ extractShortcut2Template: e.target.value })}
               style={{ minWidth: 100 }}
             >
-              {config.extract.templates.map(t => (
-                <option key={t.id} value={t.id}>{t.name}</option>
+              {config.extract.templates.map(tpl => (
+                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
             <input
@@ -364,8 +386,8 @@ export function GeneralTab({ config, onSave }: Props) {
         </div>
       )}
 
-      <SettingGroup title="其他">
-        <SettingRow label="最大录音时长" description="超时自动停止并处理，单位为秒">
+      <SettingGroup title={t('general.group.other')}>
+        <SettingRow label={t('general.maxRecording')} description={t('general.maxRecordingDesc')}>
           <input
             type="number"
             className="input"
@@ -380,7 +402,7 @@ export function GeneralTab({ config, onSave }: Props) {
             style={{ width: 80, textAlign: 'center' }}
           />
         </SettingRow>
-        <SettingRow label="开机自启" description="登录后自动启动 ByeType">
+        <SettingRow label={t('general.launchAtLogin')} description={t('general.launchAtLoginDesc')}>
           <Toggle
             checked={config.general.launchAtLogin}
             onChange={async checked => {
@@ -395,8 +417,8 @@ export function GeneralTab({ config, onSave }: Props) {
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="麦克风">
-        <SettingRow label="输入设备" description="选择用于语音输入的麦克风">
+      <SettingGroup title={t('general.group.microphone')}>
+        <SettingRow label={t('general.inputDevice')} description={t('general.inputDeviceDesc')}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <select
               className="select"
@@ -407,33 +429,33 @@ export function GeneralTab({ config, onSave }: Props) {
               {devices.map(d => (
                 <option key={d.name} value={d.name}>
                   {d.name === 'system-default'
-                    ? '系统默认'
-                    : `${d.name}${d.isDefault ? ' (默认)' : ''}`}
+                    ? t('general.systemDefault')
+                    : d.isDefault ? t('general.deviceWithDefault', { name: d.name }) : d.name}
                 </option>
               ))}
             </select>
             <button
               className="file-picker-btn"
               onClick={refreshDevices}
-              title="刷新设备列表"
+              title={t('general.refreshDevicesTitle')}
             >
-              刷新
+              {t('general.refresh')}
             </button>
           </div>
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="网络与性能">
+      <SettingGroup title={t('general.group.network')}>
         <SettingRow
-          label="本机转写接口"
-          description="允许本机程序通过HTTP提交音频，结果以纯文本返回"
+          label={t('general.localApi')}
+          description={t('general.localApiDesc')}
         >
           <Toggle
             checked={config.localApi.enabled}
             onChange={enabled => onSave({ ...config, localApi: { ...config.localApi, enabled } })}
           />
         </SettingRow>
-        <SettingRow label="本机接口端口" description="仅监听127.0.0.1，不接受局域网访问">
+        <SettingRow label={t('general.localApiPort')} description={t('general.localApiPortDesc')}>
           <input
             className="input"
             type="number"
@@ -449,7 +471,7 @@ export function GeneralTab({ config, onSave }: Props) {
             style={{ width: 100 }}
           />
         </SettingRow>
-        <SettingRow label="接口状态">
+        <SettingRow label={t('general.apiStatus')}>
           <span style={{
             color: localApiStatus.error
               ? '#ff3b30'
@@ -464,11 +486,11 @@ export function GeneralTab({ config, onSave }: Props) {
             {localApiStatus.error
               ? localApiStatus.error
               : localApiStatus.running
-                ? `运行中：127.0.0.1:${localApiStatus.port}`
-                : '未开启'}
+                ? t('general.apiRunning', { port: localApiStatus.port ?? '' })
+                : t('general.apiOff')}
           </span>
         </SettingRow>
-        <SettingRow label="curl示例" description="文件名和Content-Type按实际音频格式修改">
+        <SettingRow label={t('general.curlExample')} description={t('general.curlExampleDesc')}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 440 }}>
             <code style={{
               fontSize: 11,
@@ -486,11 +508,11 @@ export function GeneralTab({ config, onSave }: Props) {
                 setTimeout(() => setCurlCopied(false), 1500)
               }}
             >
-              {curlCopied ? '已复制' : '复制'}
+              {curlCopied ? t('general.copied') : t('common.copy')}
             </button>
           </div>
         </SettingRow>
-        <SettingRow label="转写超时时间" description="单位：秒">
+        <SettingRow label={t('general.transcribeTimeout')} description={t('general.seconds')}>
           <input
             className="input"
             type="number"
@@ -504,7 +526,7 @@ export function GeneralTab({ config, onSave }: Props) {
             style={{ width: 100 }}
           />
         </SettingRow>
-        <SettingRow label="文本优化超时时间" description="单位：秒">
+        <SettingRow label={t('general.optimizeTimeout')} description={t('general.seconds')}>
           <input
             className="input"
             type="number"
@@ -518,7 +540,7 @@ export function GeneralTab({ config, onSave }: Props) {
             style={{ width: 100 }}
           />
         </SettingRow>
-        <SettingRow label="最大重试次数">
+        <SettingRow label={t('general.maxRetries')}>
           <input
             className="input"
             type="number"
@@ -532,7 +554,7 @@ export function GeneralTab({ config, onSave }: Props) {
             style={{ width: 100 }}
           />
         </SettingRow>
-        <SettingRow label="最大并行任务数">
+        <SettingRow label={t('general.maxParallel')}>
           <input
             className="input"
             type="number"
@@ -546,22 +568,6 @@ export function GeneralTab({ config, onSave }: Props) {
             style={{ width: 100 }}
           />
         </SettingRow>
-        <SettingRow label="HTTP 代理" description="用于 Gemini 等需要代理的服务">
-          <Toggle
-            checked={config.advanced.proxyEnabled}
-            onChange={checked => updateAdvanced({ proxyEnabled: checked })}
-          />
-        </SettingRow>
-        {config.advanced.proxyEnabled && (
-          <SettingRow label="代理地址">
-            <input
-              className="input input-wide"
-              value={config.advanced.proxyUrl}
-              onChange={e => updateAdvanced({ proxyUrl: e.target.value })}
-              placeholder="http://127.0.0.1:10809"
-            />
-          </SettingRow>
-        )}
       </SettingGroup>
     </div>
   )

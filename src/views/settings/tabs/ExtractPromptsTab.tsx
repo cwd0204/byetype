@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { AppConfig } from '../../../core/types'
 import { PromptEditor, PromptFileEntry } from '../components/PromptEditor'
 import { createUserPromptFile } from '../../../lib/tauri-api'
+import { t, useLang } from '../../../i18n'
 
 const BUILTIN_EXTRACT_TEMPLATE_IDS = ['image-extract', 'image-translate', 'image-custom']
 
@@ -43,6 +44,7 @@ function TemplateNameInput({ value, onChange }: { value: string; onChange: (v: s
 }
 
 function ExtractPromptsTabInner({ config, onSave }: Props) {
+  useLang()
   const [expandedTemplates, setExpandedTemplates] = useState<Set<string>>(new Set())
 
   const toggleExpand = (id: string) => {
@@ -81,7 +83,7 @@ function ExtractPromptsTabInner({ config, onSave }: Props) {
     try {
       // 先创建空白提示词文件，编辑器才有真实文件可读写
       const promptPath = await createUserPromptFile(id)
-      const newTemplate = { id, name: '新模板', prompt: promptPath }
+      const newTemplate = { id, name: t('prompts.newTemplate'), prompt: promptPath }
       onSave({
         ...config,
         extract: {
@@ -99,7 +101,7 @@ function ExtractPromptsTabInner({ config, onSave }: Props) {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
-      <h2 className="content-title" style={{ flexShrink: 0 }}>图像识别提示词</h2>
+      <h2 className="content-title" style={{ flexShrink: 0 }}>{t('prompts.extractTitle')}</h2>
       <div style={{ flexShrink: 0 }}>
         {templates.map(template => {
           const isBuiltin = BUILTIN_EXTRACT_TEMPLATE_IDS.includes(template.id)
@@ -154,7 +156,7 @@ function ExtractPromptsTabInner({ config, onSave }: Props) {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {isBuiltin ? '内置' : '用户'}
+                  {isBuiltin ? t('prompts.builtin') : t('prompts.user')}
                 </span>
                 {!isBuiltin && (
                   <button
@@ -195,7 +197,7 @@ function ExtractPromptsTabInner({ config, onSave }: Props) {
           style={{ width: '100%', marginTop: 8 }}
           onClick={addTemplate}
         >
-          + 添加模板
+          {t('prompts.addTemplate')}
         </button>
       </div>
     </div>

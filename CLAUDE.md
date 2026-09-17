@@ -72,12 +72,12 @@ shortcut.rs  全局快捷键（2 个语音 + 2 个图像，各绑一个 template
 
 ### AI 层（`src-tauri/src/ai/`）
 
-- `mod.rs` 是唯一分发点，按 `ResolvedModel.protocol` 路由：`gemini` → `gemini.rs`；`qwen-omni` → `openai_compat::qwen_omni_*`；`mimo` → `mimo.rs`；`bedrock` → `bedrock.rs`（Converse API，只做文本 / 图像）；`aws-transcribe` → `transcribe_aws.rs`（流式 ASR，只做音频）；其余 → `openai_compat.rs`。DeepSeek 官方 API 按 `base_url` 含 `api.deepseek.com` 单独识别（`is_deepseek`）走 `deepseek.rs`，OpenRouter 上的 deepseek 仍走普通 openai-compat
-- 分发集中在三处：`transcribe_with_prompt`（音频）、`extract_text`（图像）、`run_text`（文本，被 `optimize` / `complete_text` / `analyze_correction` 共用），成功后 `record_usage`。**新增 protocol 时三处都要加分支**
-- `models.rs` 的 `BUILTIN_MODELS`（id 以 `builtin-` 开头，OpenRouter 的以 `builtin-or-` 开头，AWS 的以 `builtin-bedrock-*` / `builtin-aws-transcribe`）与 `src/core/models.ts` 的 `BUILTIN_MODELS` 是**两份手动镜像**，必须同步改；下线旧 id 时在 `config/migration.rs` 加迁移并补测试
-- `resolve_model` 按 protocol 从 `config.models.builtin_api_keys` 取 key。新增服务商 = 新增 `BuiltinApiKeys` 字段（Rust `config/types.rs` + TS `core/types.ts`）+ 两侧 `BUILTIN_MODELS` + `ModelsTab.tsx` 的 key 输入 + `core/types.ts` 的 protocol 联合类型
-- **AWS 两个协议不用 API Key**：凭证走 `aws.rs` 的 SDK 默认凭证链（`~/.aws/config` 的 profile，ADA `credential_process` / 静态 key / SSO 都行），配置只有 `models.aws` 里的 profile + region（Bedrock 与 Transcribe 分开，因为同一角色可能只授权其一）。SDK 错误统一经 `aws::map_sdk_error` 转成 `"<Label> API error (<status>): ..."` 以配合 `retry.rs`；SDK 不走 app 的 HTTP 代理设置
-- Amazon Transcribe 吃不到提示词，所以 `prompt.rs` 的 `build_optimize_prompt` 在转写模型是它时强制带上 rules / vocabulary / voice-learning（`models::transcribe_needs_post_correction`）
+- **只有 AWS 两个协议**（本分支已删除 Gemini / 千问 / MiMo / OpenRouter / DeepSeek）：`aws-transcribe` → `transcribe_aws.rs`（流式 ASR，只做音频）；`bedrock` → `bedrock.rs`（Converse API，只做文本 / 图像）。`mod.rs` 里 `transcribe_audio` 要求音频模型是 Transcribe，`extract_text` / `run_text`（被 `optimize` / `complete_text` / `analyze_correction` 共用）要求文本模型是 Bedrock，成功后 `record_usage`
+- `models.rs` 的 `BUILTIN_MODELS`（3 个 Claude `builtin-bedrock-*` + `builtin-aws-transcribe`）与 `src/core/models.ts` 的 `BUILTIN_MODELS` 是**两份手动镜像**，必须同步改；`DEFAULT_TRANSCRIBE_MODEL` / `DEFAULT_TEXT_MODEL` 两个常量是新装默认与迁移兜底。自定义模型只允许 `protocol = bedrock`（填任意模型 / 推理配置 id）
+- **不用 API Key**：凭证走 `aws.rs` 的 SDK 默认凭证链（`~/.aws/config` 的 profile，ADA `credential_process` / 静态 key / SSO 都行），配置只有 `models.aws` 里的 profile + region（Bedrock 与 Transcribe 分开，因为同一角色可能只授权其一）。SDK 错误统一经 `aws::map_sdk_error` 转成 `"<Label> API error (<status>): ..."` 以配合 `retry.rs`；SDK 不走 `advanced.proxy_*`（字段与 `build_client` 管道保留但 UI 已移除）
+- Transcribe 多语言识别只收 PCM，`transcribe_aws.rs` 先用 `audio::input::decode_to_pcm16` 解码内部 FLAC；Claude 5 系列思考用 `adaptive` + `output_config.effort`，4.5 及更早用 `enabled` + `budget_tokens`，`bedrock.rs` 按模型名猜、被拒后换另一种重试
+- Amazon Transcribe 吃不到提示词，所以 `prompt.rs` 的 `build_optimize_prompt` 在转写模型是它时强制带上 rules / vocabulary / voice-learning（`models::transcribe_needs_post_correction`）；`build_transcribe_prompt` 暂时闲置（`#[allow(dead_code)]`）
+- `config/migration.rs` 末尾的 `migrate_to_aws_only` 把旧配置里所有非 AWS 模型 id 收口到默认值、丢弃 `builtinApiKeys` 与非 Bedrock 自定义模型、抬高超时、把 `MINIMAL` 思考档并入 `LOW`
 - 真机联调测试带 `#[ignore]`：`cargo test --lib live_ -- --ignored --nocapture`（需要本机 AWS 凭证与 `/tmp/byetype-test-zh.wav` 样本，生成方法见 `transcribe_aws.rs` 测试注释）
 - `transport.rs` 是 OpenAI 兼容请求的公共通道；`retry.rs` 的 `with_retry` 靠解析错误字串里的 `(<status>)` 判断 4xx 不重试（408 / 429 除外），所以各 provider 的错误必须保持 `"<Provider> API error (<status>): <body>"` 格式
 - `prompt.rs` 把提示词拼成 `<document name="...">` 块：转写 = agent + vocabulary + rules + voice-learning；优化默认只带模板本身，开了 `reuse_transcribe_references` 才再带一遍规则；图像 = 模板本身。内置模板 id → 文件名映射在 `builtin_prompt_filename`
@@ -102,7 +102,7 @@ detector.rs   每 detect_poll_secs 秒 pgrep -x CptHost（Zoom 只在开会时�
       capture/mod.rs   专用线程：MicBackend(cpal) + 系统音频后端 → chunker → FLAC → tokio 队列
       capture/macos_tap.rs  Core Audio 进程 tap（14.2+）：CATapDescription(objc) → dlsym 的 AudioHardwareCreateProcessTap → 私有聚合设备 → IOProc
       chunker.rs       双轨对齐、混音、16 kHz、静音处切段（默认 240 s，硬上限 +90 s）、「我 / 对方」能量提示
-      run_transcriber  串行转写每段：Transcribe 开说话人分离；LLM 走 meeting-transcribe.md + 上一段结尾
+      run_transcriber  串行转写每段：Transcribe 开说话人分离（`meeting/transcribe.rs`）
       finalize         停采集 → 等队列排空 → summary.rs（meeting-summary.md，>120k 字 map-reduce）→ store 落盘 → 导出笔记目录
   → store.rs   <app_data>/meetings/<id>/{meta.json, transcript.jsonl, transcript.md, summary.md, audio/}
 ```
@@ -111,6 +111,12 @@ detector.rs   每 detect_poll_secs 秒 pgrep -x CptHost（Zoom 只在开会时�
 - 托盘的「开始/停止会议录制」「自动检测 Zoom 会议」由 `tray::update_meeting_items` 刷新；托盘图标由听写与会议两个状态合成（`tray::set_dictation_recording` / `set_meeting_recording`）
 - 系统音频需要 `Info.plist` 的 `NSAudioCaptureUsageDescription` 与 TCC「仅系统音频录制」授权；设置页的「请求权限」调用 `macos_tap::probe` 提前触发弹窗
 - Windows 侧只有探测（`CptHost.exe`），系统音频后端未实现，会退化成只录麦克风
+
+### 界面语言（中 / 英）
+
+- 配置 `general.language` = `system` | `zh-CN` | `en`；前端 `src/i18n/index.ts` 提供 `t(key, vars)` / `useLang()` / `applyLanguage()`，文案按区域拆在 `src/i18n/messages/<area>.ts`（zh / en key 必须一一对应，由 `messages/index.ts` 合并）。**每个渲染文案的组件都要调用 `useLang()`**（有些组件被 `memo`，父组件重渲染到不了它）
+- 设置窗口改语言 → `applyLanguage` + `broadcastLanguage`（Tauri 事件 `language-changed`）；其他窗口在入口 `bootstrapLanguage()` 读配置并跟随事件
+- Rust 侧 `src-tauri/src/i18n.rs`：托盘菜单、窗口标题、导出 Markdown 的标题、说话人标签与主要错误文案走 `i18n::tr`；`save_config` 发现语言变化时调 `i18n::apply_language`。备份 / 本机接口 / 学习分析等深层错误仍是中文
 
 ## 📝 修改提示词的落点
 

@@ -7,6 +7,7 @@ use super::session::{self, MeetingManager, MeetingStatus, StartSource};
 use super::store::{MeetingDetail, MeetingMeta};
 use super::{capture, summary, window};
 use crate::config::ConfigManager;
+use crate::i18n::{tr, tr_fmt};
 
 #[tauri::command]
 pub fn meeting_get_status(manager: State<'_, MeetingManager>) -> MeetingStatus {
@@ -53,7 +54,7 @@ pub fn meeting_delete(
     id: String,
 ) -> Result<(), String> {
     if manager.is_active(&id) {
-        return Err("会议仍在录制或收尾中，不能删除".to_string());
+        return Err(tr("err.meetingDeleteActive").to_string());
     }
     manager.store().delete(&id)?;
     let _ = app.emit("meeting-list-updated", ());
@@ -72,7 +73,7 @@ pub fn meeting_save_summary(
     let dir = store.dir_of(&id);
     let mut meta = store
         .read_meta(&dir)
-        .ok_or_else(|| format!("找不到会议 {}", id))?;
+        .ok_or_else(|| tr_fmt("err.meetingNotFound", &[("id", id.as_str())]))?;
     store.write_summary(&dir, &content)?;
     if let Some(title) = summary::parse_title(&content) {
         meta.title = title;
@@ -100,12 +101,14 @@ pub async fn meeting_pick_notes_folder(app: AppHandle) -> Result<Option<String>,
     app.dialog().file().pick_folder(move |folder| {
         let _ = tx.send(folder);
     });
-    let folder = rx.await.map_err(|_| "选择目录已取消".to_string())?;
+    let folder = rx
+        .await
+        .map_err(|_| tr("err.pickFolderCancelled").to_string())?;
     match folder {
         Some(path) => path
             .into_path()
             .map(|p| Some(p.to_string_lossy().to_string()))
-            .map_err(|e| format!("无法解析所选目录: {}", e)),
+            .map_err(|e| tr_fmt("err.pickFolderInvalid", &[("error", e.to_string().as_str())])),
         None => Ok(None),
     }
 }
@@ -133,14 +136,16 @@ pub fn meeting_reveal(manager: State<'_, MeetingManager>, id: String) -> Result<
             .arg("-R")
             .arg(&target)
             .spawn()
-            .map_err(|e| format!("打开 Finder 失败: {}", e))?;
+            .map_err(|e| tr_fmt("err.openFinderFailed", &[("error", e.to_string().as_str())]))?;
     }
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
             .arg(format!("/select,{}", target.display()))
             .spawn()
-            .map_err(|e| format!("打开资源管理器失败: {}", e))?;
+            .map_err(|e| {
+                tr_fmt("err.openExplorerFailed", &[("error", e.to_string().as_str())])
+            })?;
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -181,7 +186,7 @@ pub async fn meeting_request_permissions() -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err("当前平台暂不支持录制系统音频".to_string())
+        Err(tr("err.systemAudioUnsupported").to_string())
     }
 }
 

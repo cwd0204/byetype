@@ -5,6 +5,7 @@ mod bubble;
 mod clipboard;
 mod config;
 mod commands;
+mod i18n;
 mod preview;
 mod shortcut;
 mod tray;
@@ -104,6 +105,8 @@ pub fn run() {
                 .expect("Failed to resolve app_data_dir");
             let legacy_config_dir = app.path().config_dir().unwrap_or_default();
             let config_manager = ConfigManager::new(data_dir.clone(), legacy_config_dir);
+            // 语言在建托盘、恢复未收尾会议之前就定下来，避免先出中文再改成英文
+            i18n::set_current(i18n::Lang::from_setting(&config_manager.get().general.language));
             app.manage(config_manager);
             app.manage(learning::VoiceLearningManager::new(&data_dir));
             usage::init(&data_dir, app_handle.clone());
@@ -125,6 +128,9 @@ pub fn run() {
             // 会议记录：状态机 + Zoom 探测轮询
             app.manage(meeting::MeetingManager::new(&app_handle, &data_dir));
             meeting::detector::spawn(app_handle.clone());
+
+            // 窗口标题与托盘文案按语言设置刷新（三个窗口在 tauri.conf.json 里预声明，此时已存在）
+            i18n::apply_language(&app_handle);
 
             let local_api_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {

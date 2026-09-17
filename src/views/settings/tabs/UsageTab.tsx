@@ -2,47 +2,52 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { onEvent } from '../../../lib/tauri-api'
 import type { UsageRecord, UsageScene, TimingRecord } from '../../../core/types'
+import { getLang, t, useLang } from '../../../i18n'
 
-const SCENES: { id: UsageScene; label: string; color: string }[] = [
-  { id: 'transcribe', label: '转写', color: '#007aff' },
-  { id: 'extract', label: '识别', color: '#ff9500' },
-  { id: 'optimize', label: '优化', color: '#34c759' },
-  { id: 'learn', label: '学习', color: '#af52de' },
-  { id: 'meeting-transcribe', label: '会议转写', color: '#ff2d55' },
-  { id: 'meeting-summary', label: '会议纪要', color: '#5ac8fa' },
+// labelKey 是文案 key，渲染时经 t() 取当前语言
+const SCENES: { id: UsageScene; labelKey: string; color: string }[] = [
+  { id: 'transcribe', labelKey: 'usage.scene.transcribe', color: '#007aff' },
+  { id: 'extract', labelKey: 'usage.scene.extract', color: '#ff9500' },
+  { id: 'optimize', labelKey: 'usage.scene.optimize', color: '#34c759' },
+  { id: 'learn', labelKey: 'usage.scene.learn', color: '#af52de' },
+  { id: 'meeting-transcribe', labelKey: 'usage.scene.meetingTranscribe', color: '#ff2d55' },
+  { id: 'meeting-summary', labelKey: 'usage.scene.meetingSummary', color: '#5ac8fa' },
 ]
 
 const TIMING_COLORS = { transcribe: '#007aff', optimize: '#34c759' }
 
 type RangeId = 'today' | '7d' | '30d' | 'all'
 
-const RANGES: { id: RangeId; label: string; trendBase: string }[] = [
-  { id: 'today', label: '今天', trendBase: '较昨天' },
-  { id: '7d', label: '近7天', trendBase: '较上一周' },
-  { id: '30d', label: '近30天', trendBase: '较上一月' },
-  { id: 'all', label: '全部', trendBase: '较前半周期' },
+const RANGES: { id: RangeId; labelKey: string; trendBaseKey: string }[] = [
+  { id: 'today', labelKey: 'usage.range.today', trendBaseKey: 'usage.trendBase.today' },
+  { id: '7d', labelKey: 'usage.range.7d', trendBaseKey: 'usage.trendBase.7d' },
+  { id: '30d', labelKey: 'usage.range.30d', trendBaseKey: 'usage.trendBase.30d' },
+  { id: 'all', labelKey: 'usage.range.all', trendBaseKey: 'usage.trendBase.all' },
 ]
 
 const DAY_MS = 86400000
 const HOUR_MS = 3600000
 
+/** Token 数缩写：中文按亿/万，英文按 M/K */
 function fmtTok(n: number): string {
-  if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿'
-  if (n >= 1e4) return (n / 1e4).toFixed(1) + '万'
-  return n.toLocaleString('zh-CN')
+  const en = getLang() === 'en'
+  const [big, mid] = en ? [1e6, 1e3] : [1e8, 1e4]
+  if (n >= big) return t('usage.fmt.tokBig', { v: (n / big).toFixed(2) })
+  if (n >= mid) return t('usage.fmt.tokMid', { v: (n / mid).toFixed(1) })
+  return n.toLocaleString(en ? 'en-US' : 'zh-CN')
 }
 
 function fmtNum(n: number): string {
-  return n.toLocaleString('zh-CN')
+  return n.toLocaleString(getLang() === 'en' ? 'en-US' : 'zh-CN')
 }
 
 function fmtMs(ms: number): string {
   if (!ms || ms <= 0) return '—'
   const s = ms / 1000
-  if (s < 10) return s.toFixed(1) + '秒'
-  if (s < 60) return Math.round(s) + '秒'
+  if (s < 10) return t('usage.fmt.seconds', { s: s.toFixed(1) })
+  if (s < 60) return t('usage.fmt.seconds', { s: Math.round(s) })
   const m = Math.floor(s / 60)
-  return m + '分' + Math.round(s - m * 60) + '秒'
+  return t('usage.fmt.minSec', { m, s: Math.round(s - m * 60) })
 }
 
 function pad(n: number): string {
@@ -134,7 +139,10 @@ function makeBuckets(range: RangeId, days: number, allStart: number, now: number
 
   if (range === 'today') {
     const curHour = new Date(now).getHours()
-    for (let h = 0; h <= curHour; h++) labels.push({ label: h + '时', tipLabel: h + '时' })
+    for (let h = 0; h <= curHour; h++) {
+      const l = t('usage.fmt.hour', { h })
+      labels.push({ label: l, tipLabel: l })
+    }
     index = ts => Math.floor((ts - todayStart) / HOUR_MS)
   } else if (range === '7d' || range === '30d') {
     const n = range === '7d' ? 7 : 30
@@ -161,6 +169,7 @@ function makeBuckets(range: RangeId, days: number, allStart: number, now: number
 }
 
 export function UsageTab() {
+  const lang = useLang()
   const [records, setRecords] = useState<UsageRecord[]>([])
   const [timing, setTiming] = useState<TimingRecord[]>([])
   const [view, setView] = useState<'token' | 'timing'>('token')
@@ -321,7 +330,7 @@ export function UsageTab() {
       trend, buckets, maxBucket, labelStep,
       days: b.days,
     }
-  }, [records, range, scene])
+  }, [records, range, scene, lang])
 
   // ===== 处理耗时视图数据 =====
   const timingView = useMemo(() => {
@@ -412,7 +421,7 @@ export function UsageTab() {
       models, maxCalls,
       buckets, maxBucket, labelStep,
     }
-  }, [timing, range])
+  }, [timing, range, lang])
 
   const handleRangeChange = useCallback((id: RangeId) => {
     setRange(id)
@@ -427,7 +436,7 @@ export function UsageTab() {
           className={`range-tab${range === r.id ? ' active' : ''}`}
           onClick={() => handleRangeChange(r.id)}
         >
-          {r.label}
+          {t(r.labelKey)}
         </button>
       ))}
     </div>
@@ -435,8 +444,8 @@ export function UsageTab() {
 
   const viewSeg = (
     <div className="view-seg">
-      <button className={view === 'token' ? 'active' : ''} onClick={() => { setView('token'); setTip(null) }}>Token用量</button>
-      <button className={view === 'timing' ? 'active' : ''} onClick={() => { setView('timing'); setTip(null) }}>处理耗时</button>
+      <button className={view === 'token' ? 'active' : ''} onClick={() => { setView('token'); setTip(null) }}>{t('usage.view.token')}</button>
+      <button className={view === 'timing' ? 'active' : ''} onClick={() => { setView('timing'); setTip(null) }}>{t('usage.view.timing')}</button>
     </div>
   )
 
@@ -447,7 +456,7 @@ export function UsageTab() {
           className={`usage-clear-btn${confirming ? ' confirming' : ''}`}
           onClick={handleClear}
         >
-          {confirming ? '确认清空？' : '清空记录'}
+          {confirming ? t('usage.clearConfirm') : t('usage.clear')}
         </button>
       </div>
     </div>
@@ -458,21 +467,23 @@ export function UsageTab() {
     if (!tokenView.hasAny) {
       return (
         <div>
-          <h2 className="content-title">用量统计</h2>
+          <h2 className="content-title">{t('usage.title')}</h2>
           {viewSeg}
           {rangeTabs}
-          <div className="usage-empty">暂无用量记录，使用语音转写、图像识别或自动学习后自动累积</div>
+          <div className="usage-empty">{t('usage.emptyToken')}</div>
         </div>
       )
     }
 
     const trendClass = tokenView.trend === null ? '' : tokenView.trend >= 0 ? 'usage-trend-up' : 'usage-trend-down'
-    const rangeLabel = RANGES.find(r => r.id === range)?.label ?? ''
-    const trendBase = RANGES.find(r => r.id === range)?.trendBase ?? ''
+    const rangeDef = RANGES.find(r => r.id === range)
+    const rangeLabel = rangeDef ? t(rangeDef.labelKey) : ''
+    const trendBase = rangeDef ? t(rangeDef.trendBaseKey) : ''
+    const granularity = range === 'today' ? t('usage.byHour') : range === 'all' ? t('usage.byBucket') : t('usage.byDay')
 
     return (
       <div onMouseLeave={() => setTip(null)}>
-        <h2 className="content-title">用量统计</h2>
+        <h2 className="content-title">{t('usage.title')}</h2>
         {viewSeg}
 
         <div className="usage-toolbar">
@@ -482,7 +493,7 @@ export function UsageTab() {
               className={`scene-chip${scene === 'all' ? ' active' : ''}`}
               onClick={() => { setScene('all'); setTip(null) }}
             >
-              全部 <span className="cnt">{fmtNum(tokenView.sceneCounts.all || 0)}次</span>
+              {t('usage.all')} <span className="cnt">{t('usage.allCount', { n: fmtNum(tokenView.sceneCounts.all || 0) })}</span>
             </button>
             {SCENES.map(s => (
               <button
@@ -491,7 +502,7 @@ export function UsageTab() {
                 onClick={() => { setScene(s.id); setTip(null) }}
               >
                 <span className="chip-dot" style={{ background: s.color }} />
-                {s.label}
+                {t(s.labelKey)}
                 <span className="cnt">{fmtNum(tokenView.sceneCounts[s.id] || 0)}</span>
               </button>
             ))}
@@ -500,27 +511,27 @@ export function UsageTab() {
 
         <div className="usage-cards">
           <div className="usage-stat-card">
-            <div className="usage-stat-label">总消耗Token · {rangeLabel}</div>
+            <div className="usage-stat-label">{t('usage.totalTokens', { range: rangeLabel })}</div>
             <div className="usage-stat-value num">{fmtTok(tokenView.total)}</div>
-            <div className="usage-stat-sub num">输入 {fmtTok(tokenView.input)} · 输出 {fmtTok(tokenView.output)}</div>
+            <div className="usage-stat-sub num">{t('usage.inOut', { input: fmtTok(tokenView.input), output: fmtTok(tokenView.output) })}</div>
           </div>
           <div className="usage-stat-card">
-            <div className="usage-stat-label">API调用</div>
-            <div className="usage-stat-value num">{fmtNum(tokenView.calls)}<span style={{ fontSize: 11, fontWeight: 400 }}> 次</span></div>
-            <div className="usage-stat-sub num">日均 {fmtNum(Math.round(tokenView.calls / tokenView.days))} 次</div>
+            <div className="usage-stat-label">{t('usage.apiCalls')}</div>
+            <div className="usage-stat-value num">{fmtNum(tokenView.calls)}<span style={{ fontSize: 11, fontWeight: 400 }}>{t('usage.timesSuffix')}</span></div>
+            <div className="usage-stat-sub num">{t('usage.dailyAvg', { n: fmtNum(Math.round(tokenView.calls / tokenView.days)) })}</div>
           </div>
           <div className="usage-stat-card">
-            <div className="usage-stat-label">最常用模型</div>
+            <div className="usage-stat-label">{t('usage.topModel')}</div>
             <div className="usage-stat-value small" title={tokenView.topModel?.model}>{tokenView.topModel ? tokenView.topModel.model : '—'}</div>
-            <div className="usage-stat-sub num">{tokenView.topModel ? `占${tokenView.topShare}% · ${fmtTok(tokenView.topModel.total)}` : '暂无调用'}</div>
+            <div className="usage-stat-sub num">{tokenView.topModel ? t('usage.topShare', { share: tokenView.topShare, tokens: fmtTok(tokenView.topModel.total) }) : t('usage.noCalls')}</div>
           </div>
           <div className="usage-stat-card">
-            <div className="usage-stat-label">消耗趋势</div>
+            <div className="usage-stat-label">{t('usage.trend')}</div>
             <div className={`usage-stat-value num ${trendClass}`}>
               {tokenView.trend === null ? '—' : `${tokenView.trend >= 0 ? '+' : ''}${tokenView.trend}%`}
             </div>
             <div className="usage-stat-sub">
-              {tokenView.trend === null ? '上期无记录' : `${trendBase}${tokenView.trend >= 0 ? '增加' : '减少'}`}
+              {tokenView.trend === null ? t('usage.noPrevious') : tokenView.trend >= 0 ? t('usage.trendUp', { base: trendBase }) : t('usage.trendDown', { base: trendBase })}
             </div>
           </div>
         </div>
@@ -528,13 +539,13 @@ export function UsageTab() {
         <div className="usage-panel">
           <div className="usage-panel-head">
             <span className="usage-panel-title">
-              Token用量{range === 'today' ? '（按小时）' : range === 'all' ? '（按天及以上汇总）' : '（按天）'}
+              {t('usage.tokenChartTitle', { granularity })}
             </span>
             <div className="usage-legend">
               {SCENES.map(s => (
                 <span key={s.id} className="usage-legend-item">
                   <span className="chip-dot" style={{ background: s.color }} />
-                  {s.label}
+                  {t(s.labelKey)}
                 </span>
               ))}
             </div>
@@ -584,13 +595,13 @@ export function UsageTab() {
                     <div key={s.id} className="tt-row">
                       <span className="tt-scene">
                         <span className="chip-dot" style={{ background: s.color }} />
-                        {s.label}
+                        {t(s.labelKey)}
                       </span>
                       <b>{fmtNum(tokenView.buckets[tip.index].scenes[s.id] || 0)}</b>
                     </div>
                   ))}
                   <div className="tt-row tt-total">
-                    <span>合计</span>
+                    <span>{t('usage.total')}</span>
                     <b>{fmtNum(tokenView.buckets[tip.index].total)}</b>
                   </div>
                 </div>
@@ -600,22 +611,22 @@ export function UsageTab() {
         </div>
 
         <div className="usage-panel">
-          <div className="usage-panel-head"><span className="usage-panel-title">按模型汇总</span></div>
+          <div className="usage-panel-head"><span className="usage-panel-title">{t('usage.byModel')}</span></div>
           <div style={{ overflowX: 'auto' }}>
             <table className="usage-table">
               <thead>
                 <tr>
-                  <th>模型</th>
-                  <th>调用次数</th>
-                  <th>输入Token</th>
-                  <th>输出Token</th>
-                  <th>总Token</th>
-                  <th>占比</th>
+                  <th>{t('usage.col.model')}</th>
+                  <th>{t('usage.col.calls')}</th>
+                  <th>{t('usage.col.input')}</th>
+                  <th>{t('usage.col.output')}</th>
+                  <th>{t('usage.col.total')}</th>
+                  <th>{t('usage.col.share')}</th>
                 </tr>
               </thead>
               <tbody>
                 {tokenView.models.length === 0 ? (
-                  <tr><td colSpan={6} className="usage-table-empty">当前筛选条件下暂无调用</td></tr>
+                  <tr><td colSpan={6} className="usage-table-empty">{t('usage.emptyFiltered')}</td></tr>
                 ) : tokenView.models.map(m => {
                   const share = tokenView.total > 0
                     ? Math.round((m.total / tokenView.total) * 100)
@@ -656,23 +667,25 @@ export function UsageTab() {
   if (!timingView.hasAny) {
     return (
       <div>
-        <h2 className="content-title">用量统计</h2>
+        <h2 className="content-title">{t('usage.title')}</h2>
         {viewSeg}
         {rangeTabs}
-        <div className="usage-empty">暂无处理耗时记录，完成一次语音录音后自动累积</div>
+        <div className="usage-empty">{t('usage.emptyTiming')}</div>
       </div>
     )
   }
 
-  const rangeLabel = RANGES.find(r => r.id === range)?.label ?? ''
-  const trendBase = RANGES.find(r => r.id === range)?.trendBase ?? ''
+  const rangeDef = RANGES.find(r => r.id === range)
+  const rangeLabel = rangeDef ? t(rangeDef.labelKey) : ''
+  const trendBase = rangeDef ? t(rangeDef.trendBaseKey) : ''
+  const granularity = range === 'today' ? t('usage.byHour') : range === 'all' ? t('usage.byBucket') : t('usage.byDay')
   const trendClassT = timingView.trend === null ? '' : timingView.trend >= 0 ? 'usage-trend-up' : 'usage-trend-down'
   const shareT = timingView.avgTotal > 0 ? Math.round(timingView.avgTrans / timingView.avgTotal * 100) : 0
   const shareO = timingView.avgTotal > 0 ? Math.round(timingView.avgOpt / timingView.avgTotal * 100) : 0
 
   return (
     <div onMouseLeave={() => setTip(null)}>
-      <h2 className="content-title">用量统计</h2>
+      <h2 className="content-title">{t('usage.title')}</h2>
       {viewSeg}
 
       <div className="usage-toolbar">
@@ -681,44 +694,44 @@ export function UsageTab() {
 
       <div className="usage-cards">
         <div className="usage-stat-card">
-          <div className="usage-stat-label">平均处理耗时 · {rangeLabel}</div>
+          <div className="usage-stat-label">{t('usage.avgTotal', { range: rangeLabel })}</div>
           <div className="usage-stat-value num">{fmtMs(timingView.avgTotal)}</div>
           <div className="usage-stat-sub">
             {timingView.trend === null
-              ? '上期无记录'
-              : <>{trendBase}{timingView.trend >= 0 ? '变慢' : '变快'} · <span className={trendClassT}>{timingView.trend >= 0 ? '+' : ''}{timingView.trend}%</span></>}
+              ? t('usage.noPrevious')
+              : <>{timingView.trend >= 0 ? t('usage.slower', { base: trendBase }) : t('usage.faster', { base: trendBase })} · <span className={trendClassT}>{timingView.trend >= 0 ? '+' : ''}{timingView.trend}%</span></>}
           </div>
         </div>
         <div className="usage-stat-card">
-          <div className="usage-stat-label">音频转写平均</div>
+          <div className="usage-stat-label">{t('usage.avgTranscribe')}</div>
           <div className="usage-stat-value num">{fmtMs(timingView.avgTrans)}</div>
-          <div className="usage-stat-sub num">占总耗时{shareT}%</div>
+          <div className="usage-stat-sub num">{t('usage.shareOfTotal', { pct: shareT })}</div>
         </div>
         <div className="usage-stat-card">
-          <div className="usage-stat-label">文本优化平均</div>
+          <div className="usage-stat-label">{t('usage.avgOptimize')}</div>
           <div className="usage-stat-value num">{fmtMs(timingView.avgOpt)}</div>
-          <div className="usage-stat-sub num">占总耗时{shareO}%</div>
+          <div className="usage-stat-sub num">{t('usage.shareOfTotal', { pct: shareO })}</div>
         </div>
         <div className="usage-stat-card">
-          <div className="usage-stat-label">录音次数</div>
-          <div className="usage-stat-value num">{fmtNum(timingView.calls)}<span style={{ fontSize: 11, fontWeight: 400 }}> 次</span></div>
-          <div className="usage-stat-sub num">日均 {fmtNum(Math.round(timingView.calls / timingView.days))} 次</div>
+          <div className="usage-stat-label">{t('usage.recordings')}</div>
+          <div className="usage-stat-value num">{fmtNum(timingView.calls)}<span style={{ fontSize: 11, fontWeight: 400 }}>{t('usage.timesSuffix')}</span></div>
+          <div className="usage-stat-sub num">{t('usage.dailyAvg', { n: fmtNum(Math.round(timingView.calls / timingView.days)) })}</div>
         </div>
       </div>
 
       <div className="usage-panel">
         <div className="usage-panel-head">
           <span className="usage-panel-title">
-            处理耗时{range === 'today' ? '（按小时）' : range === 'all' ? '（按天及以上汇总）' : '（按天）'}
+            {t('usage.timingChartTitle', { granularity })}
           </span>
           <div className="usage-legend">
             <span className="usage-legend-item">
               <span className="chip-dot" style={{ background: TIMING_COLORS.transcribe }} />
-              音频转写
+              {t('usage.legend.transcribe')}
             </span>
             <span className="usage-legend-item">
               <span className="chip-dot" style={{ background: TIMING_COLORS.optimize }} />
-              文本优化
+              {t('usage.legend.optimize')}
             </span>
           </div>
         </div>
@@ -764,13 +777,13 @@ export function UsageTab() {
                   top: flipBelow ? tip.y + tip.h + 8 : tip.y - 8,
                 }}
               >
-                <div className="tt-date">{b.tipLabel}{b.count > 0 ? ` · ${b.count}次` : ''}</div>
+                <div className="tt-date">{b.tipLabel}{b.count > 0 ? ` · ${t('usage.recordingCount', { n: b.count })}` : ''}</div>
                 {b.count > 0 ? (
                   <>
                     <div className="tt-row">
                       <span className="tt-scene">
                         <span className="chip-dot" style={{ background: TIMING_COLORS.transcribe }} />
-                        音频转写
+                        {t('usage.legend.transcribe')}
                       </span>
                       <b>{fmtMs(b.avgTrans)}</b>
                     </div>
@@ -778,22 +791,22 @@ export function UsageTab() {
                       <div className="tt-row">
                         <span className="tt-scene">
                           <span className="chip-dot" style={{ background: TIMING_COLORS.optimize }} />
-                          文本优化
+                          {t('usage.legend.optimize')}
                         </span>
                         <b>{fmtMs(b.avgOpt)}</b>
                       </div>
                     )}
                     <div className="tt-row">
-                      <span>其他</span>
+                      <span>{t('usage.other')}</span>
                       <b>{fmtMs(b.avgOther)}</b>
                     </div>
                     <div className="tt-row tt-total">
-                      <span>平均总耗时</span>
+                      <span>{t('usage.avgTotalTip')}</span>
                       <b>{fmtMs(b.avgTotal)}</b>
                     </div>
                   </>
                 ) : (
-                  <div className="tt-row"><span>无录音</span></div>
+                  <div className="tt-row"><span>{t('usage.noRecordings')}</span></div>
                 )}
               </div>
             )
@@ -802,21 +815,21 @@ export function UsageTab() {
       </div>
 
       <div className="usage-panel">
-        <div className="usage-panel-head"><span className="usage-panel-title">按模型汇总</span></div>
+        <div className="usage-panel-head"><span className="usage-panel-title">{t('usage.byModel')}</span></div>
         <div style={{ overflowX: 'auto' }}>
           <table className="usage-table">
             <thead>
               <tr>
-                <th>模型</th>
-                <th>音频转写平均</th>
-                <th>文本优化平均</th>
-                <th>调用次数</th>
-                <th>占比</th>
+                <th>{t('usage.col.model')}</th>
+                <th>{t('usage.avgTranscribe')}</th>
+                <th>{t('usage.avgOptimize')}</th>
+                <th>{t('usage.col.calls')}</th>
+                <th>{t('usage.col.share')}</th>
               </tr>
             </thead>
             <tbody>
               {timingView.models.length === 0 ? (
-                <tr><td colSpan={5} className="usage-table-empty">当前时间范围内暂无调用</td></tr>
+                <tr><td colSpan={5} className="usage-table-empty">{t('usage.emptyRange')}</td></tr>
               ) : timingView.models.map(m => (
                 <tr key={m.model + '|' + m.provider}>
                   <td>
@@ -827,20 +840,20 @@ export function UsageTab() {
                     {m.transCount > 0 ? (
                       <>
                         <div className="num">{fmtMs(m.avgTrans)}</div>
-                        <div className="usage-stage-sub num">{fmtNum(m.transCount)}次</div>
+                        <div className="usage-stage-sub num">{t('usage.callCount', { n: fmtNum(m.transCount) })}</div>
                       </>
                     ) : (
-                      <span className="usage-stage-none">未参与</span>
+                      <span className="usage-stage-none">{t('usage.notInvolved')}</span>
                     )}
                   </td>
                   <td>
                     {m.optCount > 0 ? (
                       <>
                         <div className="num">{fmtMs(m.avgOpt)}</div>
-                        <div className="usage-stage-sub num">{fmtNum(m.optCount)}次</div>
+                        <div className="usage-stage-sub num">{t('usage.callCount', { n: fmtNum(m.optCount) })}</div>
                       </>
                     ) : (
-                      <span className="usage-stage-none">未参与</span>
+                      <span className="usage-stage-none">{t('usage.notInvolved')}</span>
                     )}
                   </td>
                   <td className="num"><b>{fmtNum(m.calls)}</b></td>

@@ -8,6 +8,7 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::config::ConfigManager;
+use crate::i18n::{tr, tr_fmt};
 use crate::meeting::session::{MeetingStatus, SessionPhase, StartSource};
 use crate::meeting::MeetingManager;
 
@@ -15,10 +16,17 @@ use crate::meeting::MeetingManager;
 static DICTATION_RECORDING: AtomicBool = AtomicBool::new(false);
 static MEETING_RECORDING: AtomicBool = AtomicBool::new(false);
 
-/// 需要动态改文字 / 勾选状态的菜单项句柄。
+/// 菜单项句柄。切换语言时要重写全部文案，所以每一项都留着；
+/// `meeting_toggle` / `meeting_auto` 还会随会议状态改文字与勾选。
 pub struct TrayHandles {
+    settings: MenuItem<Wry>,
+    history: MenuItem<Wry>,
+    learning: MenuItem<Wry>,
     meeting_toggle: MenuItem<Wry>,
+    meeting_open: MenuItem<Wry>,
     meeting_auto: CheckMenuItem<Wry>,
+    about: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
 }
 
 /// Show the settings window by moving it back on-screen and focusing it.
@@ -55,21 +63,39 @@ fn navigate(app: &AppHandle, tab: &str) {
 }
 
 pub fn create(app: &AppHandle) -> Result<(), String> {
-    let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)
+    let settings_item = MenuItem::with_id(app, "settings", tr("tray.settings"), true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let history_item = MenuItem::with_id(app, "history", "历史记录", true, None::<&str>)
+    let history_item = MenuItem::with_id(app, "history", tr("tray.history"), true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let learning_item = MenuItem::with_id(app, "auto_learning", "自动学习", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
-    let meeting_toggle = MenuItem::with_id(app, "meeting_toggle", "开始会议录制", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
-    let meeting_open = MenuItem::with_id(app, "meeting_open", "会议记录…", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
+    let learning_item = MenuItem::with_id(
+        app,
+        "auto_learning",
+        tr("tray.autoLearning"),
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let meeting_toggle = MenuItem::with_id(
+        app,
+        "meeting_toggle",
+        tr("tray.meetingStart"),
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let meeting_open = MenuItem::with_id(
+        app,
+        "meeting_open",
+        tr("tray.meetingOpen"),
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
     let meeting_config = app.state::<ConfigManager>().get().meeting;
     let meeting_auto = CheckMenuItem::with_id(
         app,
         "meeting_auto",
-        "自动检测 Zoom 会议",
+        tr("tray.meetingAuto"),
         true,
         meeting_config.enabled && meeting_config.auto_detect,
         None::<&str>,
@@ -77,10 +103,10 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let separator_a = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let separator_b = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-    let about_item =
-        MenuItem::with_id(app, "about", "关于", true, None::<&str>).map_err(|e| e.to_string())?;
-    let quit_item =
-        MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
+    let about_item = MenuItem::with_id(app, "about", tr("tray.about"), true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let quit_item = MenuItem::with_id(app, "quit", tr("tray.quit"), true, None::<&str>)
+        .map_err(|e| e.to_string())?;
 
     let menu = Menu::with_items(
         app,
@@ -100,8 +126,14 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     app.manage(TrayHandles {
+        settings: settings_item.clone(),
+        history: history_item.clone(),
+        learning: learning_item.clone(),
         meeting_toggle: meeting_toggle.clone(),
+        meeting_open: meeting_open.clone(),
         meeting_auto: meeting_auto.clone(),
+        about: about_item.clone(),
+        quit: quit_item.clone(),
     });
 
     let icon_bytes = include_bytes!("../icons/tray-default.png");
@@ -117,7 +149,7 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
             "history" => navigate(app, "history"),
             "auto_learning" => {
                 if let Err(error) = crate::learning::open_learning_review(app) {
-                    show_error(app, "自动学习", error);
+                    show_error(app, tr("window.learning.title"), error);
                 }
             }
             "meeting_toggle" => {
@@ -127,7 +159,7 @@ pub fn create(app: &AppHandle) -> Result<(), String> {
             }
             "meeting_open" => {
                 if let Err(error) = crate::meeting::window::show(app, None) {
-                    show_error(app, "会议记录", error);
+                    show_error(app, tr("window.meeting.title"), error);
                 }
             }
             "meeting_auto" => toggle_auto_detect(app),
@@ -159,7 +191,7 @@ fn toggle_meeting(app: &AppHandle) {
         manager.start(StartSource::Manual).map(|_| ())
     };
     if let Err(error) = result {
-        show_error(app, "会议记录", error);
+        show_error(app, tr("window.meeting.title"), error);
     }
 }
 
@@ -175,7 +207,7 @@ fn toggle_auto_detect(app: &AppHandle) {
         config.meeting.auto_detect = false;
     }
     if let Err(error) = config_manager.update(config) {
-        show_error(app, "会议记录", error);
+        show_error(app, tr("window.meeting.title"), error);
         return;
     }
     if let Some(handles) = app.try_state::<TrayHandles>() {
@@ -193,17 +225,22 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
+/// 会议开关菜单项的文字：录制中带计时，收尾中提示生成纪要，空闲显示「开始」。
+fn meeting_toggle_text(status: &MeetingStatus) -> String {
+    match status.phase {
+        SessionPhase::Recording => tr_fmt(
+            "tray.meetingStop",
+            &[("elapsed", format_elapsed(status.elapsed_secs).as_str())],
+        ),
+        SessionPhase::Finalizing => tr("tray.meetingFinalizing").to_string(),
+        SessionPhase::Idle => tr("tray.meetingStart").to_string(),
+    }
+}
+
 /// 会议状态变化时刷新菜单文字、勾选与图标。
 pub fn update_meeting_items(app: &AppHandle, status: &MeetingStatus) {
     if let Some(handles) = app.try_state::<TrayHandles>() {
-        let text = match status.phase {
-            SessionPhase::Recording => {
-                format!("停止会议录制（{}）", format_elapsed(status.elapsed_secs))
-            }
-            SessionPhase::Finalizing => "正在生成会议纪要…".to_string(),
-            SessionPhase::Idle => "开始会议录制".to_string(),
-        };
-        let _ = handles.meeting_toggle.set_text(text);
+        let _ = handles.meeting_toggle.set_text(meeting_toggle_text(status));
         let _ = handles
             .meeting_toggle
             .set_enabled(status.phase != SessionPhase::Finalizing);
@@ -213,6 +250,27 @@ pub fn update_meeting_items(app: &AppHandle, status: &MeetingStatus) {
             .set_checked(meeting.enabled && meeting.auto_detect);
     }
     set_meeting_recording(app, status.phase == SessionPhase::Recording);
+}
+
+/// 语言切换后按 `i18n::current()` 重写全部菜单文字；会议开关按当前会议状态重建。
+/// 由 `i18n::apply_language` 调用，那里已经先 `set_current`。
+pub fn apply_language(app: &AppHandle) {
+    let Some(handles) = app.try_state::<TrayHandles>() else {
+        return;
+    };
+    let _ = handles.settings.set_text(tr("tray.settings"));
+    let _ = handles.history.set_text(tr("tray.history"));
+    let _ = handles.learning.set_text(tr("tray.autoLearning"));
+    let _ = handles.meeting_open.set_text(tr("tray.meetingOpen"));
+    let _ = handles.meeting_auto.set_text(tr("tray.meetingAuto"));
+    let _ = handles.about.set_text(tr("tray.about"));
+    let _ = handles.quit.set_text(tr("tray.quit"));
+    // 启动早期 MeetingManager 可能还没 manage；那时会议一定是空闲的
+    let toggle_text = match app.try_state::<MeetingManager>() {
+        Some(manager) => meeting_toggle_text(&manager.status()),
+        None => tr("tray.meetingStart").to_string(),
+    };
+    let _ = handles.meeting_toggle.set_text(toggle_text);
 }
 
 pub fn set_dictation_recording(app: &AppHandle, recording: bool) {

@@ -1,5 +1,6 @@
 import type { AppConfig } from '../../../core/types'
 import { getVisionModels } from '../../../core/models'
+import { t, useLang } from '../../../i18n'
 import { SettingGroup } from '../components/SettingGroup'
 import { SettingRow } from '../components/SettingRow'
 
@@ -9,6 +10,7 @@ interface Props {
 }
 
 export function ExtractTab({ config, onSave }: Props) {
+  useLang()
   const { extract } = config
 
   const visionModels = getVisionModels(config)
@@ -21,21 +23,21 @@ export function ExtractTab({ config, onSave }: Props) {
 
   return (
     <div>
-      <h2 className="content-title">图像识别设置</h2>
+      <h2 className="content-title">{t('extract.title')}</h2>
 
-      <SettingGroup title="模型">
-        <SettingRow label="图像识别模型">
+      <SettingGroup title={t('extract.group.model')}>
+        <SettingRow label={t('extract.model')}>
           <select
             className="select"
             value={extract.modelId || ''}
             onChange={e => updateExtract({ modelId: e.target.value || undefined })}
             style={{ width: 260 }}
           >
-            <optgroup label="预置模型">
+            <optgroup label={t('common.builtinModels')}>
               {builtinVision.map(m => <option key={m.id} value={m.id}>{m.provider} - {m.model}</option>)}
             </optgroup>
             {customVision.length > 0 && (
-              <optgroup label="自定义模型">
+              <optgroup label={t('common.customModels')}>
                 {customVision.map(m => <option key={m.id} value={m.id}>{m.provider} - {m.model}</option>)}
               </optgroup>
             )}

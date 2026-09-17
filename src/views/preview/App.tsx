@@ -3,6 +3,8 @@ import { flushSync } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { t, useLang } from '../../i18n'
+import { bootstrapLanguage } from '../../i18n/tauri'
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -90,13 +92,18 @@ const PinIcon = ({ pinned, stroke }: { pinned: boolean; stroke: string }) => (
 )
 
 export default function App() {
+  const lang = useLang()
   const isDark = useIsDark()
-  const t = isDark ? dark : light
+  const palette = isDark ? dark : light
   const [text, setText] = useState('')
   const [copied, setCopied] = useState(false)
   const [pinned, setPinned] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const didInit = useRef(false)
+
+  // 语言跟随设置；窗口标题随语言切换
+  useEffect(() => bootstrapLanguage(), [])
+  useEffect(() => { document.title = t('preview.title') }, [lang])
 
   useEffect(() => {
     // StrictMode 会让本 effect 跑两次(挂载→清理→再挂载),而后端对 preview-ready-{label}
@@ -152,7 +159,7 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: t.bg }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: palette.bg }}>
       {/* 标题栏 */}
       <div
         onMouseDown={() => getCurrentWindow().startDragging()}
@@ -161,7 +168,7 @@ export default function App() {
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '6px 10px',
-          background: t.titlebar,
+          background: palette.titlebar,
           cursor: 'grab',
           userSelect: 'none',
         }}
@@ -170,35 +177,35 @@ export default function App() {
           <button
             onClick={handlePin}
             onMouseDown={(e) => e.stopPropagation()}
-            title={pinned ? '取消固定' : '固定窗口'}
+            title={pinned ? t('preview.unpin') : t('preview.pin')}
             style={{
               width: '30px',
               height: '30px',
               borderRadius: '6px',
-              background: pinned ? t.pinBg : t.btnBg,
+              background: pinned ? palette.pinBg : palette.btnBg,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               cursor: 'pointer',
-              border: `1px solid ${pinned ? t.pinBorder : t.btnBorder}`,
+              border: `1px solid ${pinned ? palette.pinBorder : palette.btnBorder}`,
               padding: 0,
               transition: 'all 0.2s',
             }}
           >
-            <PinIcon pinned={pinned} stroke={pinned ? t.pinStroke : t.unpinStroke} />
+            <PinIcon pinned={pinned} stroke={pinned ? palette.pinStroke : palette.unpinStroke} />
           </button>
-          <span style={{ color: t.secondaryText, fontSize: '11px' }}>识别结果</span>
+          <span style={{ color: palette.secondaryText, fontSize: '11px' }}>{t('preview.title')}</span>
         </div>
         <button
           onClick={handleClose}
           onMouseDown={(e) => e.stopPropagation()}
-          title="关闭"
+          title={t('common.close')}
           style={{
             padding: '3px 8px',
-            border: `1px solid ${t.btnBorder}`,
+            border: `1px solid ${palette.btnBorder}`,
             borderRadius: '4px',
-            background: t.btnBg,
-            color: t.secondaryText,
+            background: palette.btnBg,
+            color: palette.secondaryText,
             fontSize: '11px',
             cursor: 'pointer',
           }}
@@ -216,9 +223,9 @@ export default function App() {
           style={{
             width: '100%',
             height: '100%',
-            background: t.textareaBg,
-            color: t.textareaColor,
-            border: `1px solid ${t.textareaBorder}`,
+            background: palette.textareaBg,
+            color: palette.textareaColor,
+            border: `1px solid ${palette.textareaBorder}`,
             borderRadius: '6px',
             padding: '10px',
             fontSize: '13px',
@@ -237,16 +244,16 @@ export default function App() {
           onClick={handleCopy}
           style={{
             padding: '3px 10px',
-            border: `1px solid ${t.btnBorder}`,
+            border: `1px solid ${palette.btnBorder}`,
             borderRadius: '4px',
-            background: copied ? t.copiedBg : t.btnBg,
-            color: copied ? t.copiedText : t.btnText,
+            background: copied ? palette.copiedBg : palette.btnBg,
+            color: copied ? palette.copiedText : palette.btnText,
             fontSize: '11px',
             cursor: 'pointer',
             transition: 'all 0.2s',
           }}
         >
-          {copied ? '已复制' : '复制'}
+          {copied ? t('preview.copied') : t('common.copy')}
         </button>
       </div>
     </div>

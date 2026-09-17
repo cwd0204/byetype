@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { AppConfig, AwsConfig, CustomModelEntry } from '../../../core/types'
 import { BUILTIN_MODELS, getAllModels } from '../../../core/models'
 import { testModelConnectivity, type ConnectivityResult } from '../../../lib/tauri-api'
+import { t, useLang } from '../../../i18n'
 
 interface Props {
   config: AppConfig
@@ -12,93 +13,26 @@ interface TestResults {
   [modelId: string]: { loading: boolean; result?: ConnectivityResult }
 }
 
-const EMPTY_FORM: Omit<CustomModelEntry, 'id'> = {
-  provider: '', model: '', protocol: 'gemini', baseUrl: '', apiKey: '', audioInputMode: 'input_audio', chatTemplateKwargs: {}, supportsAudio: true, supportsText: true, supportsVision: true,
-}
+type CustomForm = Omit<CustomModelEntry, 'id'>
 
-function validateChatTemplateKwargs(value: string): string | null {
-  try {
-    const parsed: unknown = JSON.parse(value)
-    if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') return '必须填写 JSON 对象，例如 {}'
-    return null
-  } catch {
-    return 'JSON 格式不正确'
-  }
+const EMPTY_FORM: CustomForm = {
+  provider: 'Amazon Bedrock',
+  model: '',
+  protocol: 'bedrock',
+  supportsText: true,
+  supportsVision: true,
 }
 
 export function ModelsTab({ config, onSave }: Props) {
+  useLang()
   const [testResults, setTestResults] = useState<TestResults>({})
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [form, setForm] = useState(EMPTY_FORM)
-  const [chatTemplateKwargsText, setChatTemplateKwargsText] = useState('{}')
-  const [chatTemplateKwargsError, setChatTemplateKwargsError] = useState<string | null>(null)
-
-  const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({})
-  const [showCustom, setShowCustom] = useState(false)
-
-  const toggleKeyVisibility = (key: string) => {
-    setVisibleKeys(prev => ({ ...prev, [key]: !prev[key] }))
-  }
-
-  const EyeIcon = ({ visible }: { visible: boolean }) => (
-    visible ? (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-        <circle cx="12" cy="12" r="3" />
-      </svg>
-    ) : (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-        <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
-        <line x1="1" y1="1" x2="23" y2="23" />
-      </svg>
-    )
-  )
-
-  const updateBuiltinKey = (key: 'gemini' | 'deepseek' | 'dashscope' | 'openrouter' | 'mimo', value: string) => {
-    onSave({ ...config, models: { ...config.models, builtinApiKeys: { ...config.models.builtinApiKeys, [key]: value } } })
-  }
+  const [form, setForm] = useState<CustomForm>(EMPTY_FORM)
 
   const aws = config.models.aws
   const updateAws = (changes: Partial<AwsConfig>) => {
     onSave({ ...config, models: { ...config.models, aws: { ...aws, ...changes } } })
-  }
-
-  /** AWS 卡片：不用 API Key，填 profile + region，凭证由本机 ~/.aws/config 的凭证链提供 */
-  const renderAwsFields = (kind: 'bedrock' | 'transcribe') => {
-    const profile = kind === 'bedrock' ? aws.bedrockProfile : aws.transcribeProfile
-    const region = kind === 'bedrock' ? aws.bedrockRegion : aws.transcribeRegion
-    const setProfile = (value: string) => updateAws(kind === 'bedrock' ? { bedrockProfile: value } : { transcribeProfile: value })
-    const setRegion = (value: string) => updateAws(kind === 'bedrock' ? { bedrockRegion: value } : { transcribeRegion: value })
-    return (
-      <>
-        <div className="model-card-row">
-          <label>AWS Profile</label>
-          <input className="input" value={profile} onChange={e => setProfile(e.target.value)} placeholder="default" style={{ maxWidth: 240 }} spellCheck={false} />
-        </div>
-        <div className="model-card-row">
-          <label>Region</label>
-          <input className="input" value={region} onChange={e => setRegion(e.target.value)} placeholder="us-east-1" style={{ maxWidth: 240 }} spellCheck={false} />
-        </div>
-        {kind === 'transcribe' && (
-          <div className="model-card-row">
-            <label>识别语言</label>
-            <select className="input" value={aws.transcribeLanguage} onChange={e => updateAws({ transcribeLanguage: e.target.value })} style={{ maxWidth: 240 }}>
-              <option value="auto">自动（中文 + 英文混合）</option>
-              <option value="zh-CN">中文 zh-CN</option>
-              <option value="en-US">英文 en-US</option>
-              <option value="ja-JP">日语 ja-JP</option>
-            </select>
-          </div>
-        )}
-        <div className="model-card-subtitle">
-          凭证来自 ~/.aws/config 中的 profile（ADA credential_process、静态 key、SSO 均可），Midway 过期时先在终端运行 mwinit -o。AWS 请求不经过 app 的 HTTP 代理设置。
-          {kind === 'transcribe' && ' Transcribe 没有提示词能力，专有词纠错在文本优化阶段完成；长音频建议把「通用设置」里的转写超时调到 60 秒以上。'}
-        </div>
-      </>
-    )
   }
 
   const testModel = async (modelId: string) => {
@@ -112,244 +46,166 @@ export function ModelsTab({ config, onSave }: Props) {
   }
 
   const testAll = async () => {
-    const models = getAllModels(config)
-    for (const m of models) { testModel(m.id) }
+    for (const m of getAllModels(config)) { testModel(m.id) }
   }
 
   const saveCustomModel = () => {
-    const kwargsError = validateChatTemplateKwargs(chatTemplateKwargsText)
-    if (kwargsError) {
-      setChatTemplateKwargsError(kwargsError)
-      return
-    }
     const id = editingId || crypto.randomUUID()
-    const entry: CustomModelEntry = { ...form, id, chatTemplateKwargs: JSON.parse(chatTemplateKwargsText) as Record<string, unknown> }
+    const entry: CustomModelEntry = { ...form, id, model: form.model.trim(), provider: form.provider.trim() || 'Amazon Bedrock', protocol: 'bedrock' }
     const custom = editingId
       ? config.models.custom.map(m => (m.id === editingId ? entry : m))
       : [...config.models.custom, entry]
     onSave({ ...config, models: { ...config.models, custom } })
-    setShowForm(false); setEditingId(null); setForm(EMPTY_FORM); setChatTemplateKwargsText('{}'); setChatTemplateKwargsError(null)
+    cancelForm()
   }
 
   const deleteCustomModel = (id: string) => {
-    const custom = config.models.custom.filter(m => m.id !== id)
-    onSave({ ...config, models: { ...config.models, custom } })
+    onSave({ ...config, models: { ...config.models, custom: config.models.custom.filter(m => m.id !== id) } })
   }
 
   const startEdit = (entry: CustomModelEntry) => {
     setEditingId(entry.id)
-    const chatTemplateKwargs = entry.chatTemplateKwargs ?? {}
-    setForm({ provider: entry.provider, model: entry.model, protocol: entry.protocol, baseUrl: entry.baseUrl, apiKey: entry.apiKey, audioInputMode: entry.audioInputMode ?? 'input_audio', chatTemplateKwargs, supportsAudio: entry.supportsAudio, supportsText: entry.supportsText, supportsVision: entry.supportsVision })
-    setChatTemplateKwargsText(JSON.stringify(chatTemplateKwargs, null, 2))
-    setChatTemplateKwargsError(null)
+    setForm({ provider: entry.provider, model: entry.model, protocol: 'bedrock', supportsText: entry.supportsText ?? true, supportsVision: entry.supportsVision ?? true })
     setShowForm(true)
   }
 
-  const cancelForm = () => { setShowForm(false); setEditingId(null); setForm(EMPTY_FORM); setChatTemplateKwargsText('{}'); setChatTemplateKwargsError(null) }
+  const cancelForm = () => { setShowForm(false); setEditingId(null); setForm(EMPTY_FORM) }
 
   const renderTestResult = (modelId: string) => {
-    const t = testResults[modelId]
-    if (!t) return null
-    if (t.loading) return <span className="model-test-result" style={{ color: 'var(--text-tertiary)' }}>...</span>
-    if (t.result?.success) return <span className="model-test-result success">{t.result.latencyMs}ms</span>
-    return <span className="model-test-result error" title={t.result?.error || ''}>{t.result?.error?.slice(0, 30) || '失败'}</span>
+    const res = testResults[modelId]
+    if (!res) return null
+    if (res.loading) return <span className="model-test-result" style={{ color: 'var(--text-tertiary)' }}>...</span>
+    if (res.result?.success) return <span className="model-test-result success">{res.result.latencyMs}ms</span>
+    return <span className="model-test-result error" title={res.result?.error || ''}>{res.result?.error?.slice(0, 30) || t('common.failed')}</span>
   }
 
-  const geminiKey = config.models.builtinApiKeys.gemini
-  const deepseekKey = config.models.builtinApiKeys.deepseek
+  const renderCaps = (m: { supportsAudio: boolean; supportsVision: boolean; supportsText: boolean }) => (
+    <span className="model-caps">
+      {m.supportsAudio && <span className="cap-tag cap-audio">{t('models.cap.audio')}</span>}
+      {m.supportsVision && <span className="cap-tag cap-vision">{t('models.cap.vision')}</span>}
+      {m.supportsText && <span className="cap-tag cap-text">{t('models.cap.text')}</span>}
+    </span>
+  )
 
-  type KeyField = 'gemini' | 'deepseek' | 'dashscope' | 'openrouter' | 'mimo'
-  type ProviderGroup = { keyField: KeyField | null; aws: 'bedrock' | 'transcribe' | null; placeholder: string; models: typeof BUILTIN_MODELS }
-  const builtinByProvider = BUILTIN_MODELS.reduce<Record<string, ProviderGroup>>((acc, m) => {
-    if (!acc[m.provider]) {
-      const awsKind = m.protocol === 'bedrock' ? 'bedrock' : m.protocol === 'aws-transcribe' ? 'transcribe' : null
-      const keyField: KeyField | null = awsKind ? null
-        : m.provider === 'OpenRouter' ? 'openrouter' : m.protocol === 'gemini' ? 'gemini' : m.protocol === 'qwen-omni' ? 'dashscope' : m.protocol === 'mimo' ? 'mimo' : 'deepseek'
-      const placeholder = m.provider === 'OpenRouter' ? 'sk-or-v1-...' : m.protocol === 'gemini' ? 'AIzaSy...' : 'sk-...'
-      acc[m.provider] = { keyField, aws: awsKind, placeholder, models: [] }
-    }
-    acc[m.provider].models.push(m)
-    return acc
-  }, {})
+  const bedrockModels = BUILTIN_MODELS.filter(m => m.protocol === 'bedrock')
+  const transcribeModels = BUILTIN_MODELS.filter(m => m.protocol === 'aws-transcribe')
+
+  const profileField = (label: string, value: string, onChange: (v: string) => void, placeholder: string) => (
+    <div className="model-card-row">
+      <label>{label}</label>
+      <input className="input" value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} style={{ maxWidth: 240 }} spellCheck={false} />
+    </div>
+  )
 
   return (
     <div>
       <div className="models-header">
-        <h2 className="content-title" style={{ margin: 0 }}>模型管理</h2>
-        <button className="test-all-btn" onClick={testAll}>测试全部连通性</button>
+        <h2 className="content-title" style={{ margin: 0 }}>{t('models.title')}</h2>
+        <button className="test-all-btn" onClick={testAll}>{t('models.testAll')}</button>
       </div>
 
-      <div className="models-section-title">预置模型</div>
-      {Object.entries(builtinByProvider).map(([provider, group]) => {
-        const keyField = group.keyField
-        const keyValue = keyField === null ? ''
-          : keyField === 'gemini' ? geminiKey
-          : keyField === 'dashscope' ? config.models.builtinApiKeys.dashscope
-          : keyField === 'openrouter' ? config.models.builtinApiKeys.openrouter
-          : keyField === 'mimo' ? config.models.builtinApiKeys.mimo
-          : deepseekKey
-        return (
-          <div key={provider} className="model-card">
-            <div className="model-card-header">
-              <span className="model-card-title">{provider}</span>
-            </div>
-            {group.aws ? renderAwsFields(group.aws) : keyField && (
-              <div className="model-card-row">
-                <label>API Key</label>
-                <div className="api-key-wrapper">
-                  <input className="input" type={visibleKeys[keyField] ? 'text' : 'password'} value={keyValue} onChange={e => updateBuiltinKey(keyField, e.target.value)} placeholder={group.placeholder} />
-                  {keyValue && (
-                    <button className="api-key-toggle" onClick={() => toggleKeyVisibility(keyField)} title={visibleKeys[keyField] ? '隐藏密钥' : '显示密钥'}>
-                      <EyeIcon visible={visibleKeys[keyField]} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-            <div className="provider-model-list">
-              {group.models.map(m => (
-                <div key={m.id} className="provider-model-item">
-                  <span className="provider-model-name">{m.model}</span>
-                  <span className="model-caps">
-                    {m.supportsAudio && <span className="cap-tag cap-audio">音频</span>}
-                    {m.supportsVision && <span className="cap-tag cap-vision">图像</span>}
-                    {m.supportsText && <span className="cap-tag cap-text">文本</span>}
-                  </span>
-                  <div className="model-card-actions">
-                    {renderTestResult(m.id)}
-                    <button className="model-test-btn" onClick={() => testModel(m.id)}>测试</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )
-      })}
-
-      <div className="models-section-title" style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => setShowCustom(!showCustom)}>
-        自定义模型 {showCustom ? '▼' : '▶'}
-      </div>
-      {showCustom ? (
-        <>
-          {config.models.custom.map(entry => (
-            <div key={entry.id} className="model-card">
-              <div className="model-card-header">
-                <span className="model-card-title">{entry.provider} - {entry.model}</span>
-                <div className="model-card-actions">
-                  {renderTestResult(entry.id)}
-                  <button className="model-test-btn" onClick={() => testModel(entry.id)}>测试</button>
-                  <button className="model-action-btn" onClick={() => startEdit(entry)}>编辑</button>
-                  <button className="model-action-btn danger" onClick={() => deleteCustomModel(entry.id)}>删除</button>
-                </div>
-              </div>
-              <div className="model-card-subtitle">
-                {entry.protocol} · {entry.baseUrl}
-                <span className="model-caps" style={{ marginLeft: 8 }}>
-                  {entry.supportsAudio && <span className="cap-tag cap-audio">音频</span>}
-                  {entry.supportsVision && <span className="cap-tag cap-vision">图像</span>}
-                  {entry.supportsText && <span className="cap-tag cap-text">文本</span>}
-                </span>
+      <div className="models-section-title">Amazon Bedrock</div>
+      <div className="model-card">
+        <div className="model-card-header">
+          <span className="model-card-title">Claude on Bedrock</span>
+        </div>
+        {profileField('AWS Profile', aws.bedrockProfile, v => updateAws({ bedrockProfile: v }), 'default')}
+        {profileField('Region', aws.bedrockRegion, v => updateAws({ bedrockRegion: v }), 'us-east-1')}
+        <div className="model-card-subtitle">
+          {t('models.bedrockDesc')}
+        </div>
+        <div className="provider-model-list">
+          {bedrockModels.map(m => (
+            <div key={m.id} className="provider-model-item">
+              <span className="provider-model-name">{m.model}</span>
+              {renderCaps(m)}
+              <div className="model-card-actions">
+                {renderTestResult(m.id)}
+                <button className="model-test-btn" onClick={() => testModel(m.id)}>{t('models.test')}</button>
               </div>
             </div>
           ))}
+        </div>
+      </div>
+
+      <div className="models-section-title">Amazon Transcribe</div>
+      <div className="model-card">
+        <div className="model-card-header">
+          <span className="model-card-title">{t('models.transcribeTitle')}</span>
+        </div>
+        {profileField('AWS Profile', aws.transcribeProfile, v => updateAws({ transcribeProfile: v }), 'default')}
+        {profileField('Region', aws.transcribeRegion, v => updateAws({ transcribeRegion: v }), 'us-east-1')}
+        <div className="model-card-row">
+          <label>{t('models.transcribeLanguage')}</label>
+          <select className="input" value={aws.transcribeLanguage} onChange={e => updateAws({ transcribeLanguage: e.target.value })} style={{ maxWidth: 240 }}>
+            <option value="auto">{t('models.lang.auto')}</option>
+            <option value="zh-CN">{t('models.lang.zh')}</option>
+            <option value="en-US">{t('models.lang.en')}</option>
+            <option value="ja-JP">{t('models.lang.ja')}</option>
+          </select>
+        </div>
+        <div className="model-card-subtitle">
+          {t('models.transcribeDesc')}
+        </div>
+        <div className="provider-model-list">
+          {transcribeModels.map(m => (
+            <div key={m.id} className="provider-model-item">
+              <span className="provider-model-name">{m.model}</span>
+              {renderCaps(m)}
+              <div className="model-card-actions">
+                {renderTestResult(m.id)}
+                <button className="model-test-btn" onClick={() => testModel(m.id)}>{t('models.test')}</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="models-section-title">{t('models.customTitle')}</div>
+      {config.models.custom.map(entry => (
+        <div key={entry.id} className="model-card">
+          <div className="model-card-header">
+            <span className="model-card-title">{entry.provider} - {entry.model}</span>
+            <div className="model-card-actions">
+              {renderTestResult(entry.id)}
+              <button className="model-test-btn" onClick={() => testModel(entry.id)}>{t('models.test')}</button>
+              <button className="model-action-btn" onClick={() => startEdit(entry)}>{t('common.edit')}</button>
+              <button className="model-action-btn danger" onClick={() => deleteCustomModel(entry.id)}>{t('common.delete')}</button>
+            </div>
+          </div>
+          <div className="model-card-subtitle">
+            {t('models.customDesc')}
+            {renderCaps({ supportsAudio: false, supportsVision: entry.supportsVision ?? true, supportsText: entry.supportsText ?? true })}
+          </div>
+        </div>
+      ))}
 
       {showForm ? (
         <div className="model-form">
-          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 12, color: 'var(--text-primary)' }}>{editingId ? '编辑模型' : '新建模型'}</div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 12, color: 'var(--text-primary)' }}>{editingId ? t('models.editModel') : t('models.newModel')}</div>
+          <div className="model-form-row"><label>{t('models.displayName')}</label><input className="input" value={form.provider} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))} placeholder="Amazon Bedrock" style={{ flex: 1, maxWidth: 300 }} /></div>
+          <div className="model-form-row"><label>Model ID</label><input className="input" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} placeholder="global.amazon.nova-2-lite-v1:0" style={{ flex: 1, maxWidth: 400 }} spellCheck={false} /></div>
           <div className="model-form-row">
-            <label>协议类型</label>
+            <label>{t('models.capabilities')}</label>
             <div style={{ display: 'flex', gap: 12 }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
-                <input type="radio" checked={form.protocol === 'gemini'} onChange={() => setForm(f => ({ ...f, protocol: 'gemini', baseUrl: '' }))} /> Gemini
+                <input type="checkbox" checked={form.supportsText} onChange={e => setForm(f => ({ ...f, supportsText: e.target.checked }))} /> {t('models.capText')}
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
-                <input type="radio" checked={form.protocol === 'openai-compat' && form.baseUrl !== 'https://openrouter.ai/api/v1'} onChange={() => setForm(f => ({ ...f, protocol: 'openai-compat', baseUrl: '' }))} /> OpenAI 兼容
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
-                <input type="radio" checked={form.protocol === 'openai-compat' && form.baseUrl === 'https://openrouter.ai/api/v1'} onChange={() => setForm(f => ({ ...f, protocol: 'openai-compat', baseUrl: 'https://openrouter.ai/api/v1' }))} /> OpenRouter
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
-                <input type="radio" checked={form.protocol === 'bedrock'} onChange={() => setForm(f => ({ ...f, protocol: 'bedrock', baseUrl: '', apiKey: '', supportsAudio: false }))} /> Amazon Bedrock
+                <input type="checkbox" checked={form.supportsVision} onChange={e => setForm(f => ({ ...f, supportsVision: e.target.checked }))} /> {t('models.capVision')}
               </label>
             </div>
           </div>
-          {form.protocol === 'bedrock' && (
-            <div className="model-card-subtitle" style={{ marginBottom: 8 }}>
-              使用上方「Amazon Bedrock」卡里的 AWS Profile / Region；Model ID 填 Bedrock 模型或推理配置 id（如 global.anthropic.claude-sonnet-5）。
-            </div>
-          )}
-          <div className="model-form-row">
-            <label>模型能力</label>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: form.protocol === 'bedrock' ? 'not-allowed' : 'pointer', color: 'var(--text-primary)', opacity: form.protocol === 'bedrock' ? 0.5 : 1 }} title={form.protocol === 'bedrock' ? 'Bedrock 上的 Claude 不支持音频输入' : undefined}>
-                <input type="checkbox" checked={form.supportsAudio} disabled={form.protocol === 'bedrock'} onChange={e => setForm(f => ({ ...f, supportsAudio: e.target.checked }))} /> 音频转写
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
-                <input type="checkbox" checked={form.supportsVision} onChange={e => setForm(f => ({ ...f, supportsVision: e.target.checked }))} /> 图像识别
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer', color: 'var(--text-primary)' }}>
-                <input type="checkbox" checked={form.supportsText} onChange={e => setForm(f => ({ ...f, supportsText: e.target.checked }))} /> 文本处理
-              </label>
-            </div>
+          <div className="model-card-subtitle" style={{ marginBottom: 8 }}>
+            {t('models.formHint')}
           </div>
-          {form.protocol === 'openai-compat' && form.supportsAudio && (
-            <div className="model-form-row">
-              <label>音频请求格式</label>
-              <select className="input" value={form.audioInputMode} onChange={e => setForm(f => ({ ...f, audioInputMode: e.target.value as CustomModelEntry['audioInputMode'] }))} style={{ flex: 1, maxWidth: 400 }}>
-                <option value="input_audio">input_audio（OpenAI 标准）</option>
-                <option value="audio_url">audio_url（URL / Data URI 兼容）</option>
-              </select>
-            </div>
-          )}
-          <div className="model-form-row"><label>Provider</label><input className="input" value={form.provider} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))} placeholder="提供商名称" style={{ flex: 1, maxWidth: 300 }} /></div>
-          {form.protocol !== 'bedrock' && (
-            <div className="model-form-row"><label>Base URL</label><input className="input" value={form.baseUrl} onChange={e => setForm(f => ({ ...f, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" style={{ flex: 1, maxWidth: 400 }} /></div>
-          )}
-          <div className="model-form-row"><label>Model ID</label><input className="input" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} placeholder={form.protocol === 'bedrock' ? 'global.anthropic.claude-sonnet-5' : 'gemini-3.7-flash'} style={{ flex: 1, maxWidth: 300 }} /></div>
-          {form.protocol === 'openai-compat' && (
-            <div className="model-form-row" style={{ alignItems: 'flex-start' }}>
-              <label style={{ paddingTop: 7 }}>chat_template_kwargs</label>
-              <div style={{ flex: 1, maxWidth: 400 }}>
-                <textarea
-                  className="input"
-                  rows={4}
-                  value={chatTemplateKwargsText}
-                  onChange={e => {
-                    const value = e.target.value
-                    setChatTemplateKwargsText(value)
-                    setChatTemplateKwargsError(validateChatTemplateKwargs(value))
-                  }}
-                  spellCheck={false}
-                  style={{ width: '100%', resize: 'vertical', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}
-                />
-                {chatTemplateKwargsError && <div style={{ color: '#ff453a', fontSize: 11, marginTop: 4 }}>{chatTemplateKwargsError}</div>}
-              </div>
-            </div>
-          )}
-          {form.protocol !== 'bedrock' && (
-            <div className="model-form-row">
-              <label>API Key</label>
-              <div className="api-key-wrapper" style={{ maxWidth: 400 }}>
-                <input className="input" type={visibleKeys['custom-form'] ? 'text' : 'password'} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} />
-                {form.apiKey && (
-                  <button className="api-key-toggle" onClick={() => toggleKeyVisibility('custom-form')} title={visibleKeys['custom-form'] ? '隐藏密钥' : '显示密钥'}>
-                    <EyeIcon visible={visibleKeys['custom-form']} />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
           <div className="model-form-actions">
-            <button className="model-form-btn" onClick={cancelForm}>取消</button>
-            <button className="model-form-btn primary" onClick={saveCustomModel} disabled={!!chatTemplateKwargsError || !form.provider || (form.protocol !== 'bedrock' && !form.baseUrl) || !form.model || (!form.supportsAudio && !form.supportsText && !form.supportsVision)}>保存</button>
+            <button className="model-form-btn" onClick={cancelForm}>{t('common.cancel')}</button>
+            <button className="model-form-btn primary" onClick={saveCustomModel} disabled={!form.model.trim() || (!form.supportsText && !form.supportsVision)}>{t('common.save')}</button>
           </div>
         </div>
       ) : (
-        <button className="add-model-btn" onClick={() => { setEditingId(null); setForm(EMPTY_FORM); setChatTemplateKwargsText('{}'); setChatTemplateKwargsError(null); setShowForm(true) }}>+ 添加自定义模型</button>
-      )}
-        </>
-      ) : (
-        <button className="add-model-btn" onClick={() => setShowCustom(true)} style={{ color: 'var(--text-tertiary)', borderColor: 'var(--border-secondary)', fontSize: 12 }}>展开自定义模型</button>
+        <button className="add-model-btn" onClick={() => { setEditingId(null); setForm(EMPTY_FORM); setShowForm(true) }}>{t('models.addModel')}</button>
       )}
     </div>
   )

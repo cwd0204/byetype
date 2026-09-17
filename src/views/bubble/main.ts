@@ -1,5 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
+import { subscribe, t } from '../../i18n'
+import { bootstrapLanguage } from '../../i18n/tauri'
 
 const bubble = document.getElementById('bubble')!
 const currentWindow = getCurrentWindow()
@@ -9,7 +11,8 @@ let currentStatus: string = ''
 type Look = {
   shape: 'is-round' | 'is-pill'
   color: string
-  label?: string
+  /** 标签文案的 i18n key，渲染时用 t() 解析，切语言后重渲染即可换文案 */
+  labelKey?: string
   glyph?: string
   dot?: boolean
   cancel?: boolean
@@ -21,15 +24,15 @@ type Look = {
 const looks: Record<string, Look> = {
   preparing:    { shape: 'is-round', color: 'c-recording', dot: true, preparing: true },
   recording:    { shape: 'is-round', color: 'c-recording', dot: true },
-  transcribing: { shape: 'is-pill', color: 'c-thinking', label: 'Thinking...', cancel: true },
-  extracting:   { shape: 'is-pill', color: 'c-thinking', label: 'Thinking...', cancel: true },
-  optimizing:   { shape: 'is-pill', color: 'c-optimizing', label: 'Thinking...', cancel: true },
-  retrying:     { shape: 'is-pill', color: 'c-retrying', label: 'Thinking...', cancel: true },
+  transcribing: { shape: 'is-pill', color: 'c-thinking', labelKey: 'bubble.thinking', cancel: true },
+  extracting:   { shape: 'is-pill', color: 'c-thinking', labelKey: 'bubble.thinking', cancel: true },
+  optimizing:   { shape: 'is-pill', color: 'c-optimizing', labelKey: 'bubble.thinking', cancel: true },
+  retrying:     { shape: 'is-pill', color: 'c-retrying', labelKey: 'bubble.thinking', cancel: true },
   completed:    { shape: 'is-round', color: 'c-completed', glyph: '✓' },
   failed:       { shape: 'is-round', color: 'c-failed', glyph: '✕' },
   // 会议记录（独立的 bubble-meeting 窗口）：✕ 是「停止录制」而不是取消任务
-  'meeting-detected':    { shape: 'is-pill', color: 'c-recording', label: '会议录制中', dot: true, cancel: true },
-  'meeting-summarizing': { shape: 'is-pill', color: 'c-thinking', label: 'Summarizing...' },
+  'meeting-detected':    { shape: 'is-pill', color: 'c-recording', labelKey: 'bubble.meetingRecording', dot: true, cancel: true },
+  'meeting-summarizing': { shape: 'is-pill', color: 'c-thinking', labelKey: 'bubble.summarizing' },
   'meeting-done':        { shape: 'is-round', color: 'c-completed', glyph: '✓' },
   'meeting-failed':      { shape: 'is-round', color: 'c-failed', glyph: '✕' },
 }
@@ -47,7 +50,7 @@ function setPart(el: HTMLElement, selector: string, visible: boolean, text?: str
 function applyLook(el: HTMLElement, look: Look) {
   el.className = classFor(look)
   setPart(el, '.dot', !!look.dot)
-  setPart(el, '.label', !!look.label, look.label ?? '')
+  setPart(el, '.label', !!look.labelKey, look.labelKey ? t(look.labelKey) : '')
   setPart(el, '.glyph', !!look.glyph, look.glyph ?? '')
   setPart(el, '.cancel-btn', !!look.cancel)
 }
@@ -80,6 +83,12 @@ function render(status: string) {
   })
   bubble.appendChild(el)
 }
+
+// 语言跟随配置；切换语言时若气泡正显示着，就地重渲染换文案
+bootstrapLanguage()
+subscribe(() => {
+  if (currentStatus) render(currentStatus)
+})
 
 // Window-scoped listeners — each bubble only receives events targeted to it
 currentWindow.listen('clear-bubble', () => {

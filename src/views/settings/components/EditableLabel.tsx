@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { t, useLang } from '../../../i18n'
 
 interface EditableLabelProps {
   /** 当前展示的名字（自定义名 ?? 默认名）。 */
@@ -10,6 +11,7 @@ interface EditableLabelProps {
 }
 
 export function EditableLabel({ value, defaultValue, onChange }: EditableLabelProps) {
+  useLang()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -66,7 +68,7 @@ export function EditableLabel({ value, defaultValue, onChange }: EditableLabelPr
   return (
     <div
       className="setting-row-label setting-row-label-editable"
-      title="点击重命名（清空恢复默认）"
+      title={t('prompts.renameHint')}
       role="button"
       tabIndex={0}
       onClick={() => setEditing(true)}

@@ -14,31 +14,34 @@ import { MeetingTab } from './tabs/MeetingTab'
 import type { AppConfig, UpdateState, UpdateInfo } from '../../core/types'
 import { getVersion } from '@tauri-apps/api/app'
 import { getConfig, saveConfig, onEvent, checkUpdate } from '../../lib/tauri-api'
+import { applyLanguage, t, useLang } from '../../i18n'
+import { broadcastLanguage } from '../../i18n/tauri'
 import './theme.css'
 
+// label 存的是文案 key，渲染时经 t() 取当前语言
 type TabItem =
-  | { type: 'tab'; id: string; label: string }
-  | { type: 'group'; label: string }
+  | { type: 'tab'; id: string; labelKey: string }
+  | { type: 'group'; labelKey: string }
   | { type: 'divider' }
 
 const TABS: TabItem[] = [
-  { type: 'tab', id: 'general', label: '通用设置' },
-  { type: 'tab', id: 'models', label: '模型管理' },
-  { type: 'group', label: '语音转写' },
-  { type: 'tab', id: 'transcribe', label: '转写设置' },
-  { type: 'tab', id: 'voice-prompts', label: '转写提示词' },
-  { type: 'group', label: '图像识别' },
-  { type: 'tab', id: 'extract', label: '图像识别设置' },
-  { type: 'tab', id: 'extract-prompts', label: '图像识别提示词' },
-  { type: 'group', label: '智能学习' },
-  { type: 'tab', id: 'voice-learning', label: '自动学习' },
-  { type: 'group', label: '会议' },
-  { type: 'tab', id: 'meeting', label: '会议记录' },
+  { type: 'tab', id: 'general', labelKey: 'settingsApp.tab.general' },
+  { type: 'tab', id: 'models', labelKey: 'settingsApp.tab.models' },
+  { type: 'group', labelKey: 'settingsApp.group.voice' },
+  { type: 'tab', id: 'transcribe', labelKey: 'settingsApp.tab.transcribe' },
+  { type: 'tab', id: 'voice-prompts', labelKey: 'settingsApp.tab.voicePrompts' },
+  { type: 'group', labelKey: 'settingsApp.group.extract' },
+  { type: 'tab', id: 'extract', labelKey: 'settingsApp.tab.extract' },
+  { type: 'tab', id: 'extract-prompts', labelKey: 'settingsApp.tab.extractPrompts' },
+  { type: 'group', labelKey: 'settingsApp.group.learning' },
+  { type: 'tab', id: 'voice-learning', labelKey: 'settingsApp.tab.voiceLearning' },
+  { type: 'group', labelKey: 'settingsApp.group.meeting' },
+  { type: 'tab', id: 'meeting', labelKey: 'settingsApp.tab.meeting' },
   { type: 'divider' },
-  { type: 'tab', id: 'history', label: '历史记录' },
-  { type: 'tab', id: 'usage', label: '用量统计' },
-  { type: 'tab', id: 'backup', label: '备份与恢复' },
-  { type: 'tab', id: 'about', label: '关于' },
+  { type: 'tab', id: 'history', labelKey: 'settingsApp.tab.history' },
+  { type: 'tab', id: 'usage', labelKey: 'settingsApp.tab.usage' },
+  { type: 'tab', id: 'backup', labelKey: 'settingsApp.tab.backup' },
+  { type: 'tab', id: 'about', labelKey: 'settingsApp.tab.about' },
 ]
 
 const INITIAL_UPDATE_STATE: UpdateState = {
@@ -51,6 +54,7 @@ const INITIAL_UPDATE_STATE: UpdateState = {
 }
 
 export function App() {
+  useLang()
   const [activeTab, setActiveTab] = useState('general')
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [saved, setSaved] = useState(false)
@@ -58,6 +62,8 @@ export function App() {
   const [updateState, setUpdateState] = useState<UpdateState>(INITIAL_UPDATE_STATE)
   const [appVersion, setAppVersion] = useState('')
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 上一次应用到界面的语言设置；null 表示配置还没加载过，首次应用不广播
+  const appliedLanguageRef = useRef<string | null>(null)
 
   const handleUpdateState = useCallback((partial: Partial<UpdateState>) => {
     setUpdateState(prev => ({ ...prev, ...partial }))
@@ -163,6 +169,16 @@ export function App() {
     return () => mq.removeEventListener('change', handler)
   }, [config?.general.theme])
 
+  // 配置里的语言变化时应用到本窗口；非首次变化再广播给其他窗口
+  useEffect(() => {
+    if (!config) return
+    const setting = config.general.language ?? 'system'
+    applyLanguage(setting)
+    const previous = appliedLanguageRef.current
+    appliedLanguageRef.current = setting
+    if (previous !== null && previous !== setting) broadcastLanguage(setting)
+  }, [config?.general.language])
+
   const handleSave = useCallback((newConfig: AppConfig) => {
     setConfig(newConfig)
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -172,7 +188,7 @@ export function App() {
         setSaved(true)
         setTimeout(() => setSaved(false), 1500)
       } catch (e: any) {
-        const msg = typeof e === 'string' ? e : e?.message || '保存失败'
+        const msg = typeof e === 'string' ? e : e?.message || t('settingsApp.saveFailed')
         setErrorMsg(msg)
         getConfig().then(setConfig).catch(() => {})
         setTimeout(() => setErrorMsg(''), 4000)
@@ -182,14 +198,14 @@ export function App() {
 
   const showDot = updateState.phase === 'available' && !updateState.dismissed
 
-  if (!config) return <div style={{ padding: 20, color: 'var(--text-primary)' }}>Loading...</div>
+  if (!config) return <div style={{ padding: 20, color: 'var(--text-primary)' }}>{t('settingsApp.loading')}</div>
 
   return (
     <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif', height: '100vh', display: 'flex' }}>
       <div className="sidebar">
         {TABS.map((item, i) => {
           if (item.type === 'group') {
-            return <div key={`group-${i}`} className="sidebar-group">{item.label}</div>
+            return <div key={`group-${i}`} className="sidebar-group">{t(item.labelKey)}</div>
           }
           if (item.type === 'divider') {
             return <div key={`div-${i}`} className="sidebar-divider" />
@@ -201,7 +217,7 @@ export function App() {
               onClick={() => setActiveTab(item.id)}
               style={{ position: 'relative' }}
             >
-              {item.label}
+              {t(item.labelKey)}
               {item.id === 'about' && showDot && <span className="sidebar-dot" />}
             </button>
           )
@@ -210,7 +226,7 @@ export function App() {
       <div style={{ flex: 1, padding: 24, overflow: 'auto', position: 'relative', display: 'flex', flexDirection: 'column' }}>
         <span className={`saved-toast${saved ? ' visible' : ''}`}
           style={{ position: 'absolute', top: 24, right: 24 }}>
-          ✓ 已保存
+          {t('settingsApp.saved')}
         </span>
         {errorMsg && (
           <span className="saved-toast visible"

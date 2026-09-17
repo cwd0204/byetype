@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { t, useLang } from '../../i18n'
+import { bootstrapLanguage } from '../../i18n/tauri'
 
 interface LearningDraft {
   original: string
@@ -16,15 +18,27 @@ interface LearningApplyResult {
 
 type BusyAction = 'regenerate' | 'apply' | null
 
+/** 底部提示：前端文案存 key（切语言后能重译），后端 draft.notice 原文直接存字符串 */
+type Notice = string | { key: string; vars?: Record<string, string | number> }
+
+function noticeText(notice: Notice): string {
+  return typeof notice === 'string' ? notice : t(notice.key, notice.vars)
+}
+
 export default function App() {
+  const lang = useLang()
   const [original, setOriginal] = useState('')
   const [corrected, setCorrected] = useState('')
   const [generated, setGenerated] = useState('')
-  const [notice, setNotice] = useState('正在读取学习结果…')
+  const [notice, setNotice] = useState<Notice>({ key: 'learningWindow.notice.loading' })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<BusyAction>(null)
   const [saved, setSaved] = useState(false)
   const [generatedOnce, setGeneratedOnce] = useState(false)
+
+  // 语言跟随设置；窗口标题随语言切换
+  useEffect(() => bootstrapLanguage(), [])
+  useEffect(() => { document.title = t('learningWindow.title') }, [lang])
 
   const loadDraft = (draft: LearningDraft) => {
     setOriginal(draft.original)
@@ -45,7 +59,7 @@ export default function App() {
       .then(draft => {
         if (disposed) return
         if (draft) loadDraft(draft)
-        else setNotice('暂无学习草稿，请从托盘菜单重新开始。')
+        else setNotice({ key: 'learningWindow.notice.noDraft' })
       })
       .catch(reason => {
         if (!disposed) setError(String(reason))
@@ -82,8 +96,8 @@ export default function App() {
       })
       setSaved(true)
       setNotice(result.added > 0
-        ? `已录入${result.added}条学习内容。`
-        : '没有录入新内容，右栏内容已存在。')
+        ? { key: 'learningWindow.notice.added', vars: { count: result.added } }
+        : { key: 'learningWindow.notice.nothingAdded' })
     } catch (reason) {
       setError(String(reason))
     } finally {
@@ -98,7 +112,7 @@ export default function App() {
     setGeneratedOnce(false)
     setSaved(false)
     setError('')
-    setNotice('当前三栏已清空，已保存的学习记录不受影响。')
+    setNotice({ key: 'learningWindow.notice.cleared' })
   }
 
   const close = () => invoke('close_voice_learning_window')
@@ -107,45 +121,45 @@ export default function App() {
     <main className="learning-shell">
       <header className="learning-header">
         <div>
-          <h1>确认学习内容</h1>
-          <p>先核对前两栏，再开始学习。只有右栏会录入系统。</p>
+          <h1>{t('learningWindow.heading')}</h1>
+          <p>{t('learningWindow.subtitle')}</p>
         </div>
-        <button className="button button-quiet" onClick={close} disabled={busy !== null}>取消</button>
+        <button className="button button-quiet" onClick={close} disabled={busy !== null}>{t('common.cancel')}</button>
       </header>
 
       <section className="editor-grid" aria-busy={busy !== null}>
         <EditorPanel
-          label="原始输出"
-          helper="最近一次语音转写结果"
+          label={t('learningWindow.panel.original.label')}
+          helper={t('learningWindow.panel.original.helper')}
           value={original}
           onChange={value => { setOriginal(value); setSaved(false) }}
         />
         <EditorPanel
-          label="用户修订／新增要求"
-          helper="可粘贴修订文本，也可直接输入要学习的词汇或规则"
-          placeholder="例如：新增词汇：ByeType"
+          label={t('learningWindow.panel.corrected.label')}
+          helper={t('learningWindow.panel.corrected.helper')}
+          placeholder={t('learningWindow.panel.corrected.placeholder')}
           value={corrected}
           onChange={value => { setCorrected(value); setSaved(false) }}
         />
         <EditorPanel
-          label="学习结果"
-          helper="每行一项，只有这里会录入系统"
+          label={t('learningWindow.panel.generated.label')}
+          helper={t('learningWindow.panel.generated.helper')}
           value={generated}
           onChange={value => { setGenerated(value); setSaved(false) }}
           result
         />
         {busy === 'regenerate' && (
           <div className="generating-layer" role="status">
-            <strong className="generating-title">Learning…</strong>
+            <strong className="generating-title">{t('learningWindow.generating.title')}</strong>
             <div className="generating-bar" />
-            <span>AI正在分析并生成学习内容…</span>
+            <span>{t('learningWindow.generating.desc')}</span>
           </div>
         )}
       </section>
 
       <footer className="learning-footer">
         <div className={error ? 'status status-error' : saved ? 'status status-success' : 'status'}>
-          {error || notice}
+          {error || noticeText(notice)}
         </div>
         <div className="actions">
           <button
@@ -153,21 +167,21 @@ export default function App() {
             onClick={clearDraft}
             disabled={busy !== null || (original === '' && corrected === '' && generated === '')}
           >
-            清空
+            {t('learningWindow.clear')}
           </button>
           <button
             className="button button-secondary"
             onClick={regenerate}
             disabled={busy !== null || corrected.trim() === ''}
           >
-            {busy === 'regenerate' ? '正在学习…' : generatedOnce ? '重新生成' : '开始学习'}
+            {busy === 'regenerate' ? t('learningWindow.learning') : generatedOnce ? t('learningWindow.regenerate') : t('learningWindow.startLearning')}
           </button>
           <button
             className="button button-primary"
             onClick={apply}
             disabled={busy !== null || generated.trim() === '' || saved}
           >
-            {busy === 'apply' ? '正在录入…' : saved ? '已录入' : '确认录入'}
+            {busy === 'apply' ? t('learningWindow.applying') : saved ? t('learningWindow.applied') : t('learningWindow.apply')}
           </button>
         </div>
       </footer>
@@ -185,11 +199,12 @@ interface EditorPanelProps {
 }
 
 function EditorPanel({ label, helper, value, onChange, result = false, placeholder }: EditorPanelProps) {
+  useLang()
   return (
     <label className={result ? 'editor-panel result-panel' : 'editor-panel'}>
       <span className="panel-heading">
         <strong>{label}</strong>
-        {result && <span className="save-badge">将录入</span>}
+        {result && <span className="save-badge">{t('learningWindow.panel.willSave')}</span>}
       </span>
       <span className="panel-helper">{helper}</span>
       <textarea

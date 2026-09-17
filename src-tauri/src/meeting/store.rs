@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{tr, tr_fmt};
+
 pub const MEETINGS_DIR: &str = "meetings";
 pub const DEFAULT_NOTES_DIR: &str = "meetings-notes";
 
@@ -171,12 +173,14 @@ impl MeetingStore {
         segments: &[TranscriptSegment],
     ) -> Result<(), String> {
         let meta = self.read_meta(dir);
+        let started_at = meta
+            .as_ref()
+            .map(|m| m.started_at.clone())
+            .unwrap_or_default();
         let mut md = String::new();
         md.push_str(&format!(
-            "# 会议转写 {}\n",
-            meta.as_ref()
-                .map(|m| m.started_at.clone())
-                .unwrap_or_default()
+            "# {}\n",
+            tr_fmt("store.transcriptTitle", &[("date", started_at.as_str())])
         ));
         for segment in segments {
             md.push_str(&format!(
@@ -245,7 +249,7 @@ impl MeetingStore {
         let dir = self.dir_of(id);
         let meta = self
             .read_meta(&dir)
-            .ok_or_else(|| format!("找不到会议 {}", id))?;
+            .ok_or_else(|| tr_fmt("err.meetingNotFound", &[("id", id)]))?;
         Ok(MeetingDetail {
             transcript: self.read_transcript_md(&dir).unwrap_or_default(),
             summary: self.read_summary(&dir),
@@ -276,14 +280,15 @@ impl MeetingStore {
             .unwrap_or_else(|_| meta.id.replace('_', " "));
         let title = sanitize_filename(&meta.title);
         let filename = if title.is_empty() {
-            format!("{} 会议记录.md", stamp)
+            format!("{} {}.md", stamp, tr("meeting.defaultTitle"))
         } else {
             format!("{} {}.md", stamp, title)
         };
         let path = notes_folder.join(filename);
         let content = format!(
-            "{}\n\n---\n\n## 逐字转写\n\n{}\n",
+            "{}\n\n---\n\n## {}\n\n{}\n",
             summary.trim_end(),
+            tr("store.transcriptHeading"),
             transcript_body.trim()
         );
         atomic_write(&path, content.as_bytes())?;
@@ -297,7 +302,7 @@ impl MeetingStore {
                 let dir = self.dir_of(&meta.id);
                 let mut meta = meta;
                 meta.status = "interrupted".to_string();
-                meta.error = Some("上次录制未正常结束".to_string());
+                meta.error = Some(tr("store.interrupted").to_string());
                 let _ = self.write_meta(&dir, &meta);
             }
         }

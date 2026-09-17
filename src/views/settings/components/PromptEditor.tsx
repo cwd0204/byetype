@@ -15,6 +15,7 @@ import {
   onEvent,
 } from '../../../lib/tauri-api'
 import { ask } from '@tauri-apps/plugin-dialog'
+import { t, useLang } from '../../../i18n'
 
 export interface PromptFileEntry {
   key: string
@@ -102,6 +103,7 @@ interface Props {
 }
 
 export function PromptEditor({ config, onSave, promptFiles, showTabs = true, editorHeight }: Props) {
+  useLang()
   const [activeFile, setActiveFile] = useState(promptFiles[0]?.key ?? '')
   const [content, setContent] = useState('')
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error' | 'idle'>('idle')
@@ -200,7 +202,7 @@ export function PromptEditor({ config, onSave, promptFiles, showTabs = true, edi
     }
 
     if (!prompt.configPath) {
-      throw new Error('提示词文件配置不完整')
+      throw new Error(t('prompts.incompleteConfig'))
     }
     const currentConfig = configRef.current
     const customPath = getConfigValue(currentConfig, prompt.configPath)
@@ -378,7 +380,7 @@ export function PromptEditor({ config, onSave, promptFiles, showTabs = true, edi
 
   const handleResetToBuiltin = async () => {
     if (!activePrompt?.configPath || !activePrompt.builtinFilename) return
-    const yes = await ask('确定要重置为内置提示词吗？当前的修改将被覆盖。', { title: 'ByeType', kind: 'warning' })
+    const yes = await ask(t('prompts.resetConfirm'), { title: 'ByeType', kind: 'warning' })
     if (!yes) return
     await flushSave()
     const builtinPath = await copyBuiltinPrompt(activePrompt.builtinFilename, true)
@@ -419,9 +421,9 @@ export function PromptEditor({ config, onSave, promptFiles, showTabs = true, edi
         </span>
         {!activePrompt?.resolvePath && !activePrompt?.loadContent && (
           <>
-            <button className="file-picker-btn" onClick={handleBrowse}>选择文件</button>
+            <button className="file-picker-btn" onClick={handleBrowse}>{t('prompts.chooseFile')}</button>
             {activePrompt?.builtinFilename && (
-              <button className="file-picker-btn" onClick={handleResetToBuiltin}>重置为内置</button>
+              <button className="file-picker-btn" onClick={handleResetToBuiltin}>{t('prompts.resetBuiltin')}</button>
             )}
           </>
         )}
@@ -435,9 +437,9 @@ export function PromptEditor({ config, onSave, promptFiles, showTabs = true, edi
         } />
 
       <div className={`prompt-save-status ${saveStatus}`}>
-        {saveStatus === 'saving' && '保存中...'}
-        {saveStatus === 'saved' && '✓ 已保存'}
-        {saveStatus === 'error' && '保存失败'}
+        {saveStatus === 'saving' && t('prompts.saving')}
+        {saveStatus === 'saved' && t('prompts.saved')}
+        {saveStatus === 'error' && t('prompts.saveFailed')}
       </div>
     </div>
   )

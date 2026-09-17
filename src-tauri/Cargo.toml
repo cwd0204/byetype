@@ -44,6 +44,8 @@ aws-sdk-bedrockruntime = "1.143"
 aws-sdk-transcribestreaming = "1.116"
 aws-smithy-types = "1"
 futures-util = "0.3"
+# 读系统 locale，供 general.language = "system" 时决定中 / 英文案
+sys-locale = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"

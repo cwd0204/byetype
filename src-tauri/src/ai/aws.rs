@@ -11,6 +11,8 @@ use aws_config::{BehaviorVersion, Region, SdkConfig};
 use aws_sdk_bedrockruntime::config::http::HttpResponse;
 use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
 
+use crate::i18n::tr;
+
 const DEFAULT_PROFILE: &str = "default";
 const DEFAULT_REGION: &str = "us-east-1";
 
@@ -101,10 +103,8 @@ pub fn with_credential_hint(message: String) -> String {
     .iter()
     .any(|needle| lower.contains(needle));
     if credential_issue && !message.contains("mwinit -o") {
-        format!(
-            "{}（AWS 凭证不可用：请在终端运行 mwinit -o 刷新 Midway，并确认 profile 名称正确）",
-            message
-        )
+        // 提示里含 "mwinit -o"，上面的判断靠它去重，两种语言的文案都要保留这个字样
+        format!("{}{}", message, tr("err.awsCredentialHint"))
     } else {
         message
     }

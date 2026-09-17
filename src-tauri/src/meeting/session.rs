@@ -21,9 +21,9 @@ use super::chunker::ReadyChunk;
 use super::store::{MeetingMeta, MeetingStore, TranscriptSegment, DEFAULT_NOTES_DIR};
 use super::{summary, transcribe, window};
 use crate::ai;
-use crate::audio::encoder;
 use crate::config::types::AppConfig;
 use crate::config::ConfigManager;
+use crate::i18n::{tr, tr_fmt};
 
 /// 收尾时等待转写队列排空的上限
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(600);
@@ -205,7 +205,7 @@ impl MeetingManager {
         {
             let mut phase = lock(&self.phase);
             if *phase != SessionPhase::Idle {
-                return Err("已有会议正在录制或收尾中".to_string());
+                return Err(tr("err.meetingAlreadyRunning").to_string());
             }
             *phase = SessionPhase::Recording;
         }
@@ -228,10 +228,13 @@ impl MeetingManager {
     fn start_inner(&self, config: &AppConfig, source: StartSource) -> Result<(), String> {
         let transcribe_model = transcribe::transcribe_model_id(config).to_string();
         if !ai::models::supports_audio(config, &transcribe_model).unwrap_or(false) {
-            return Err(format!("会议转写模型不支持音频输入：{}", transcribe_model));
+            return Err(tr_fmt(
+                "err.meetingModelNoAudio",
+                &[("model", transcribe_model.as_str())],
+            ));
         }
         if !config.meeting.capture_microphone && !config.meeting.capture_system_audio {
-            return Err("麦克风和系统音频至少要开启一个".to_string());
+            return Err(tr("err.meetingNoInput").to_string());
         }
 
         let now = Local::now();
@@ -266,7 +269,7 @@ impl MeetingManager {
             .unwrap_or_else(|_| transcribe_model.clone());
         let meta = MeetingMeta {
             id: id.clone(),
-            title: "会议记录".to_string(),
+            title: tr("meeting.defaultTitle").to_string(),
             started_at: now.to_rfc3339(),
             ended_at: None,
             duration_secs: 0,
@@ -328,13 +331,13 @@ impl MeetingManager {
         let session = {
             let mut phase = lock(&self.phase);
             if *phase != SessionPhase::Recording {
-                return Err("当前没有正在录制的会议".to_string());
+                return Err(tr("err.meetingNotRecording").to_string());
             }
             let session = match lock(&self.active).take() {
                 Some(session) => session,
                 None => {
                     *phase = SessionPhase::Idle;
-                    return Err("会话状态异常，已重置".to_string());
+                    return Err(tr("err.meetingStateReset").to_string());
                 }
             };
             *phase = SessionPhase::Finalizing;
@@ -357,11 +360,11 @@ impl MeetingManager {
         let session = {
             let mut phase = lock(&self.phase);
             if *phase != SessionPhase::Recording {
-                return Err("当前没有正在录制的会议".to_string());
+                return Err(tr("err.meetingNotRecording").to_string());
             }
             let session = lock(&self.active).take();
             *phase = SessionPhase::Idle;
-            session.ok_or_else(|| "会话状态异常，已重置".to_string())?
+            session.ok_or_else(|| tr("err.meetingStateReset").to_string())?
         };
         session.ticker.cancel();
         session.cancel.cancel();
@@ -419,9 +422,8 @@ struct TranscriberCtx {
     chunks_pending: Arc<AtomicU32>,
 }
 
-/// 串行消费分段：每段带上一段结尾做上下文，失败的段记成占位并继续。
+/// 串行消费分段（保证顺序），失败的段记成占位并继续。
 async fn run_transcriber(ctx: TranscriberCtx, mut rx: tokio::sync::mpsc::Receiver<ReadyChunk>) {
-    let mut previous_tail = String::new();
     while let Some(chunk) = rx.recv().await {
         if ctx.cancel.is_cancelled() {
             break;
@@ -436,16 +438,13 @@ async fn run_transcriber(ctx: TranscriberCtx, mut rx: tokio::sync::mpsc::Receive
             }
         }
 
-        let (text, failed) = match transcribe_one(&ctx, &config, &chunk, &previous_tail).await {
+        let (text, failed) = match transcribe_one(&ctx, &config, &chunk).await {
             Ok(text) => (text, false),
             Err(error) => {
                 eprintln!("[Meeting] chunk {} failed: {}", chunk.index, error);
-                (format!("[转写失败：{}]", error), true)
+                (tr_fmt("err.chunkFailed", &[("error", error.as_str())]), true)
             }
         };
-        if !failed {
-            previous_tail = transcribe::tail_of(&text);
-        }
 
         let segment = TranscriptSegment {
             index: chunk.index,
@@ -476,28 +475,8 @@ async fn transcribe_one(
     ctx: &TranscriberCtx,
     config: &AppConfig,
     chunk: &ReadyChunk,
-    previous_tail: &str,
 ) -> Result<String, String> {
-    let prompts_dir = crate::commands::resolve_prompts_dir_pub(&ctx.app)?;
-    let learning_rules = ctx
-        .app
-        .state::<crate::learning::VoiceLearningManager>()
-        .rules_content();
-    let client =
-        crate::task::build_client(config.advanced.proxy_enabled, &config.advanced.proxy_url)?;
-    let flac_base64 = encoder::audio_to_base64(&chunk.flac);
-
-    let attempt = || {
-        transcribe::transcribe_chunk(
-            &client,
-            config,
-            &prompts_dir,
-            &learning_rules,
-            chunk,
-            &flac_base64,
-            previous_tail,
-        )
-    };
+    let attempt = || transcribe::transcribe_chunk(config, chunk);
     tokio::select! {
         result = ai::retry::with_retry(
             attempt,
@@ -505,7 +484,7 @@ async fn transcribe_one(
             config.meeting.chunk_timeout_secs,
             |attempt| eprintln!("[Meeting] chunk {} retry #{}", chunk.index, attempt),
         ) => result,
-        _ = ctx.cancel.cancelled() => Err("任务已取消".to_string()),
+        _ = ctx.cancel.cancelled() => Err(tr("err.taskCancelled").to_string()),
     }
 }
 
@@ -603,7 +582,7 @@ async fn finalize_inner(
     let config = app.state::<ConfigManager>().get();
     let mut meta = store
         .read_meta(dir)
-        .ok_or_else(|| "会议元数据丢失".to_string())?;
+        .ok_or_else(|| tr("err.meetingMetaMissing").to_string())?;
     meta.ended_at = Some(Local::now().to_rfc3339());
     meta.duration_secs = duration_secs;
     meta.chunk_count = chunks_done;
@@ -614,9 +593,9 @@ async fn finalize_inner(
     let transcript = store.transcript_body(dir);
     if transcript.trim().is_empty() {
         meta.status = "failed".to_string();
-        meta.error = Some("没有可用的转写内容".to_string());
+        meta.error = Some(tr("err.noTranscript").to_string());
         store.write_meta(dir, &meta)?;
-        return Err("没有可用的转写内容，无法生成纪要".to_string());
+        return Err(tr("err.noTranscriptForSummary").to_string());
     }
 
     let result = generate_summary(app, &config, &store, dir, &mut meta, &transcript).await;
@@ -682,16 +661,16 @@ pub async fn regenerate_summary(app: &AppHandle, id: &str) -> Result<(), String>
         (manager.store.clone(), manager.is_active(id))
     };
     if active {
-        return Err("会议仍在录制或收尾中".to_string());
+        return Err(tr("err.meetingStillActive").to_string());
     }
     let config = app.state::<ConfigManager>().get();
     let dir = store.dir_of(id);
     let mut meta = store
         .read_meta(&dir)
-        .ok_or_else(|| format!("找不到会议 {}", id))?;
+        .ok_or_else(|| tr_fmt("err.meetingNotFound", &[("id", id)]))?;
     let transcript = store.transcript_body(&dir);
     if transcript.trim().is_empty() {
-        return Err("这场会议没有可用的转写内容".to_string());
+        return Err(tr("err.meetingNoTranscript").to_string());
     }
     meta.status = "finalizing".to_string();
     store.write_meta(&dir, &meta)?;

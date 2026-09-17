@@ -1,12 +1,14 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { AppConfig } from '../../../core/types'
 import { PromptEditor, PromptFileEntry } from '../components/PromptEditor'
 import { createUserPromptFile } from '../../../lib/tauri-api'
+import { t, useLang } from '../../../i18n'
 
+// label 是文案 key，组件里按当前语言解析
 const TRANSCRIBE_PROMPT_FILES: PromptFileEntry[] = [
-  { key: 'agent', label: '角色定义', configPath: 'transcribe.prompts.agent', builtinFilename: 'agent.md' },
-  { key: 'rules', label: '转录规则', configPath: 'transcribe.prompts.rules', builtinFilename: 'rules.md' },
-  { key: 'vocabulary', label: '专有词汇', configPath: 'transcribe.prompts.vocabulary', builtinFilename: 'vocabulary.md' },
+  { key: 'agent', label: 'prompts.file.agent', configPath: 'transcribe.prompts.agent', builtinFilename: 'agent.md' },
+  { key: 'rules', label: 'prompts.file.rules', configPath: 'transcribe.prompts.rules', builtinFilename: 'rules.md' },
+  { key: 'vocabulary', label: 'prompts.file.vocabulary', configPath: 'transcribe.prompts.vocabulary', builtinFilename: 'vocabulary.md' },
 ]
 
 const BUILTIN_VOICE_TEMPLATE_IDS = ['voice-optimize', 'voice-translate', 'voice-custom']
@@ -49,7 +51,14 @@ function TemplateNameInput({ value, onChange }: { value: string; onChange: (v: s
 }
 
 function VoicePromptsTabInner({ config, onSave }: Props) {
+  const lang = useLang()
   const [expandedTemplates, setExpandedTemplates] = useState<Set<string>>(new Set())
+
+  // 按 lang 记忆化，切换语言前保持 promptFiles 引用稳定
+  const transcribePromptFiles = useMemo<PromptFileEntry[]>(
+    () => TRANSCRIBE_PROMPT_FILES.map(f => ({ ...f, label: t(f.label) })),
+    [lang],
+  )
 
   const toggleExpand = (id: string) => {
     setExpandedTemplates(prev => {
@@ -87,7 +96,7 @@ function VoicePromptsTabInner({ config, onSave }: Props) {
     try {
       // 先创建空白提示词文件，编辑器才有真实文件可读写
       const promptPath = await createUserPromptFile(id)
-      const newTemplate = { id, name: '新模板', prompt: promptPath }
+      const newTemplate = { id, name: t('prompts.newTemplate'), prompt: promptPath }
       onSave({
         ...config,
         voiceTemplates: {
@@ -105,15 +114,15 @@ function VoicePromptsTabInner({ config, onSave }: Props) {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
-      <h2 className="content-title" style={{ flexShrink: 0 }}>转写提示词</h2>
+      <h2 className="content-title" style={{ flexShrink: 0 }}>{t('prompts.voiceTitle')}</h2>
       <PromptEditor
         config={config}
         onSave={onSave}
-        promptFiles={TRANSCRIBE_PROMPT_FILES}
+        promptFiles={transcribePromptFiles}
         editorHeight={300}
       />
 
-      <h2 className="content-title" style={{ marginTop: 24, flexShrink: 0 }}>文本优化提示词</h2>
+      <h2 className="content-title" style={{ marginTop: 24, flexShrink: 0 }}>{t('prompts.optimizeTitle')}</h2>
       <div style={{ flexShrink: 0 }}>
         {templates.map(template => {
           const isBuiltin = BUILTIN_VOICE_TEMPLATE_IDS.includes(template.id)
@@ -168,7 +177,7 @@ function VoicePromptsTabInner({ config, onSave }: Props) {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {isBuiltin ? '内置' : '用户'}
+                  {isBuiltin ? t('prompts.builtin') : t('prompts.user')}
                 </span>
                 {!isBuiltin && (
                   <button
@@ -209,7 +218,7 @@ function VoicePromptsTabInner({ config, onSave }: Props) {
           style={{ width: '100%', marginTop: 8 }}
           onClick={addTemplate}
         >
-          + 添加模板
+          {t('prompts.addTemplate')}
         </button>
       </div>
     </div>

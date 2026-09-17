@@ -10,6 +10,7 @@ import {
   backupToLocal,
   restoreFromLocal,
 } from '../../../lib/tauri-api'
+import { getLang, t, useLang } from '../../../i18n'
 
 interface Props {
   config: AppConfig
@@ -17,6 +18,7 @@ interface Props {
 }
 
 export function BackupTab({ config, onSave }: Props) {
+  useLang()
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [s3Backing, setS3Backing] = useState(false)
@@ -43,7 +45,7 @@ export function BackupTab({ config, onSave }: Props) {
     setTestResult(null)
     try {
       await testS3Connection()
-      setTestResult({ ok: true, msg: '连接成功' })
+      setTestResult({ ok: true, msg: t('backup.connected') })
     } catch (e: any) {
       setTestResult({ ok: false, msg: String(e) })
     } finally {
@@ -67,23 +69,23 @@ export function BackupTab({ config, onSave }: Props) {
     setS3Backing(true)
     try {
       const key = await backupToS3()
-      showMessage('success', `备份成功：${key}`)
+      showMessage('success', t('backup.backupOk', { key }))
       await refreshBackups()
     } catch (e: any) {
-      showMessage('error', `备份失败：${e}`)
+      showMessage('error', t('backup.backupFailed', { error: String(e) }))
     } finally {
       setS3Backing(false)
     }
   }, [refreshBackups])
 
   const handleRestoreFromS3 = useCallback(async (key: string) => {
-    if (!confirm(`确认从 ${key} 恢复？当前配置将被覆盖，恢复后需要重启应用。`)) return
+    if (!confirm(t('backup.restoreS3Confirm', { key }))) return
     setS3Restoring(true)
     try {
       await restoreFromS3(key)
-      showMessage('success', '恢复成功，请重启应用使配置生效')
+      showMessage('success', t('backup.restoreOk'))
     } catch (e: any) {
-      showMessage('error', `恢复失败：${e}`)
+      showMessage('error', t('backup.restoreFailed', { error: String(e) }))
     } finally {
       setS3Restoring(false)
     }
@@ -93,24 +95,26 @@ export function BackupTab({ config, onSave }: Props) {
     setLocalBacking(true)
     try {
       const path = await backupToLocal()
-      showMessage('success', `备份已保存：${path}`)
+      showMessage('success', t('backup.savedTo', { path }))
     } catch (e: any) {
+      // 后端取消选择时返回的中文错误文案，用于判定「用户取消」而非展示
       if (String(e).includes('未选择')) return
-      showMessage('error', `备份失败：${e}`)
+      showMessage('error', t('backup.backupFailed', { error: String(e) }))
     } finally {
       setLocalBacking(false)
     }
   }, [])
 
   const handleRestoreFromLocal = useCallback(async () => {
-    if (!confirm('确认从本地文件恢复？当前配置将被覆盖，恢复后需要重启应用。')) return
+    if (!confirm(t('backup.restoreLocalConfirm'))) return
     setLocalRestoring(true)
     try {
       await restoreFromLocal()
-      showMessage('success', '恢复成功，请重启应用使配置生效')
+      showMessage('success', t('backup.restoreOk'))
     } catch (e: any) {
+      // 同上：匹配后端「未选择备份文件」的取消错误
       if (String(e).includes('未选择')) return
-      showMessage('error', `恢复失败：${e}`)
+      showMessage('error', t('backup.restoreFailed', { error: String(e) }))
     } finally {
       setLocalRestoring(false)
     }
@@ -125,12 +129,12 @@ export function BackupTab({ config, onSave }: Props) {
   const formatDate = (s: string) => {
     const d = new Date(s)
     if (isNaN(d.getTime())) return s
-    return d.toLocaleString('zh-CN')
+    return d.toLocaleString(getLang() === 'en' ? 'en-US' : 'zh-CN')
   }
 
   return (
     <div>
-      <h2 className="content-title">备份与恢复</h2>
+      <h2 className="content-title">{t('backup.title')}</h2>
 
       {message && (
         <div className="update-collapsed" style={{
@@ -145,8 +149,8 @@ export function BackupTab({ config, onSave }: Props) {
         </div>
       )}
 
-      <SettingGroup title="S3 兼容存储配置">
-        <SettingRow label="Endpoint" description="留空则使用 AWS S3 标准地址">
+      <SettingGroup title={t('backup.group.s3Config')}>
+        <SettingRow label="Endpoint" description={t('backup.endpointDesc')}>
           <input
             type="text"
             className="input"
@@ -196,7 +200,7 @@ export function BackupTab({ config, onSave }: Props) {
             style={{ width: 240 }}
           />
         </SettingRow>
-        <SettingRow label="路径前缀" description="S3 对象 key 的前缀">
+        <SettingRow label={t('backup.prefix')} description={t('backup.prefixDesc')}>
           <input
             type="text"
             className="input"
@@ -206,10 +210,10 @@ export function BackupTab({ config, onSave }: Props) {
             style={{ width: 240 }}
           />
         </SettingRow>
-        <SettingRow label="连接测试">
+        <SettingRow label={t('backup.connectionTest')}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button className="model-test-btn" onClick={handleTestConnection} disabled={testing}>
-              {testing ? '测试中...' : '测试连接'}
+              {testing ? t('backup.testing') : t('backup.testConnection')}
             </button>
             {testResult && (
               <span className="model-test-result" style={{
@@ -222,15 +226,15 @@ export function BackupTab({ config, onSave }: Props) {
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="S3 备份">
-        <SettingRow label="立即备份到 S3" description="将配置和提示词打包上传到 S3">
+      <SettingGroup title={t('backup.group.s3')}>
+        <SettingRow label={t('backup.backupToS3Now')} description={t('backup.backupToS3Desc')}>
           <button className="model-test-btn" onClick={handleBackupToS3} disabled={s3Backing || !s3.bucket}>
-            {s3Backing ? '备份中...' : '备份到 S3'}
+            {s3Backing ? t('backup.backingUp') : t('backup.backupToS3')}
           </button>
         </SettingRow>
-        <SettingRow label="从 S3 恢复" description="选择一个备份恢复">
+        <SettingRow label={t('backup.restoreFromS3')} description={t('backup.restoreFromS3Desc')}>
           <button className="model-test-btn" onClick={refreshBackups} disabled={loadingBackups || !s3.bucket}>
-            {loadingBackups ? '加载中...' : '刷新列表'}
+            {loadingBackups ? t('backup.loading') : t('backup.refreshList')}
           </button>
         </SettingRow>
         {backups.length > 0 && (
@@ -238,9 +242,9 @@ export function BackupTab({ config, onSave }: Props) {
             <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--border-color-light)' }}>
-                  <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-secondary)' }}>备份文件</th>
-                  <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-secondary)' }}>大小</th>
-                  <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-secondary)' }}>时间</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-secondary)' }}>{t('backup.col.file')}</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-secondary)' }}>{t('backup.col.size')}</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-secondary)' }}>{t('backup.col.time')}</th>
                   <th style={{ padding: '4px 8px' }}></th>
                 </tr>
               </thead>
@@ -256,7 +260,7 @@ export function BackupTab({ config, onSave }: Props) {
                         onClick={() => handleRestoreFromS3(b.key)}
                         disabled={s3Restoring}
                       >
-                        恢复
+                        {t('backup.restore')}
                       </button>
                     </td>
                   </tr>
@@ -267,15 +271,15 @@ export function BackupTab({ config, onSave }: Props) {
         )}
       </SettingGroup>
 
-      <SettingGroup title="本地备份">
-        <SettingRow label="备份到本地" description="选择保存位置，导出 zip 备份文件">
+      <SettingGroup title={t('backup.group.local')}>
+        <SettingRow label={t('backup.backupToLocal')} description={t('backup.backupToLocalDesc')}>
           <button className="model-test-btn" onClick={handleBackupToLocal} disabled={localBacking}>
-            {localBacking ? '备份中...' : '备份到本地'}
+            {localBacking ? t('backup.backingUp') : t('backup.backupToLocal')}
           </button>
         </SettingRow>
-        <SettingRow label="从本地恢复" description="选择 zip 备份文件恢复配置">
+        <SettingRow label={t('backup.restoreFromLocal')} description={t('backup.restoreFromLocalDesc')}>
           <button className="model-test-btn" onClick={handleRestoreFromLocal} disabled={localRestoring}>
-            {localRestoring ? '恢复中...' : '从本地恢复'}
+            {localRestoring ? t('backup.restoring') : t('backup.restoreFromLocal')}
           </button>
         </SettingRow>
       </SettingGroup>

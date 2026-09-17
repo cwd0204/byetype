@@ -16,6 +16,7 @@ use aws_sdk_transcribestreaming::Client;
 
 use super::aws;
 use crate::config::types::AwsConfig;
+use crate::i18n::{self, tr_fmt, tr_fmt_in, tr_in, Lang};
 
 const LABEL: &str = "Transcribe";
 /// 单个音频事件上限 32 KiB，取一半留余量。
@@ -26,7 +27,7 @@ const AUTO_LANGUAGE_OPTIONS: &str = "zh-CN,en-US";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TranscribeOptions {
-    /// 开启说话人分离，输出按「说话人N：」分行（会议模式用）。
+    /// 开启说话人分离，输出按「说话人N：」/「Speaker N: 」分行（会议模式用）。
     pub speaker_labels: bool,
 }
 
@@ -75,9 +76,11 @@ where
     }
 }
 
-/// 把带说话人标签的 items 拼成「说话人N：…」行。
+/// 把带说话人标签的 items 拼成「说话人N：…」（英文「Speaker N: …」）行。
 /// Transcribe 的 item 是词级（中文按字/词），英文词之间要补空格，标点直接贴上。
-pub(crate) fn render_speaker_lines(items: &[Item]) -> String {
+/// 前缀与分隔符按 `lang` 取，和 `merge_speaker_lines` 必须用同一语言。
+pub(crate) fn render_speaker_lines(items: &[Item], lang: Lang) -> String {
+    let separator = tr_in(lang, "speaker.separator");
     let mut lines: Vec<(String, String)> = Vec::new();
     for item in items {
         let content = item.content().unwrap_or("");
@@ -86,8 +89,8 @@ pub(crate) fn render_speaker_lines(items: &[Item]) -> String {
         }
         let speaker = item
             .speaker()
-            .map(|s| format!("说话人{}", speaker_number(s)))
-            .unwrap_or_else(|| "说话人".to_string());
+            .map(|s| speaker_label(lang, s))
+            .unwrap_or_else(|| tr_in(lang, "speaker.unknown").to_string());
         let is_punct = item.r#type() == Some(&ItemType::Punctuation);
 
         match lines.last_mut() {
@@ -102,9 +105,14 @@ pub(crate) fn render_speaker_lines(items: &[Item]) -> String {
     }
     lines
         .into_iter()
-        .map(|(speaker, text)| format!("{}：{}", speaker, text.trim()))
+        .map(|(speaker, text)| format!("{}{}{}", speaker, separator, text.trim()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 「说话人N」/「Speaker N」。
+fn speaker_label(lang: Lang, raw_label: &str) -> String {
+    tr_fmt_in(lang, "speaker.label", &[("n", speaker_number(raw_label).as_str())])
 }
 
 /// Transcribe 的说话人标签从 0 计数，展示时从 1 开始。
@@ -117,13 +125,23 @@ fn speaker_number(label: &str) -> String {
 }
 
 /// 英文词之间补空格；中文与标点不补。
+/// 英文词之间、英文句末标点后补空格；中文与中文标点不补。
 fn needs_space(prev: &str, next: &str) -> bool {
-    let last = prev.chars().last();
-    let first = next.chars().next();
-    matches!((last, first), (Some(a), Some(b)) if a.is_ascii_alphanumeric() && b.is_ascii_alphanumeric())
+    let (Some(last), Some(first)) = (prev.chars().last(), next.chars().next()) else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    last.is_ascii_alphanumeric() || matches!(last, '.' | ',' | '!' | '?' | ';' | ':')
 }
 
-fn collect_result(result: &TranscriptResult, speaker_labels: bool, out: &mut Vec<String>) {
+fn collect_result(
+    result: &TranscriptResult,
+    speaker_labels: bool,
+    lang: Lang,
+    out: &mut Vec<String>,
+) {
     if result.is_partial() {
         return;
     }
@@ -131,7 +149,7 @@ fn collect_result(result: &TranscriptResult, speaker_labels: bool, out: &mut Vec
         return;
     };
     let text = if speaker_labels {
-        render_speaker_lines(alternative.items())
+        render_speaker_lines(alternative.items(), lang)
     } else {
         alternative.transcript().unwrap_or("").trim().to_string()
     };
@@ -141,16 +159,18 @@ fn collect_result(result: &TranscriptResult, speaker_labels: bool, out: &mut Vec
 }
 
 /// 合并相邻同一说话人的行，避免每个 result 都重复「说话人1：」前缀。
-pub(crate) fn merge_speaker_lines(blocks: &[String]) -> String {
+/// 按 `lang` 的分隔符（中文「：」/ 英文「: 」）切出说话人，要与 `render_speaker_lines` 一致。
+pub(crate) fn merge_speaker_lines(blocks: &[String], lang: Lang) -> String {
+    let separator = tr_in(lang, "speaker.separator");
     let mut merged: Vec<String> = Vec::new();
     for block in blocks {
         for line in block.lines() {
-            let Some((speaker, text)) = line.split_once('：') else {
+            let Some((speaker, text)) = line.split_once(separator) else {
                 merged.push(line.to_string());
                 continue;
             };
             match merged.last_mut() {
-                Some(last) if last.starts_with(&format!("{}：", speaker)) => {
+                Some(last) if last.starts_with(&format!("{}{}", speaker, separator)) => {
                     if needs_space(last, text) {
                         last.push(' ');
                     }
@@ -168,6 +188,7 @@ async fn run_stream(
     bytes: Vec<u8>,
     encoding: MediaEncoding,
     opts: TranscribeOptions,
+    lang: Lang,
 ) -> Result<String, String> {
     let sdk = aws::sdk_config(&cfg.transcribe_profile, &cfg.transcribe_region).await?;
     let client = Client::new(&sdk);
@@ -206,14 +227,14 @@ async fn run_stream(
         if let TranscriptResultStream::TranscriptEvent(transcript_event) = event {
             if let Some(transcript) = transcript_event.transcript() {
                 for result in transcript.results() {
-                    collect_result(result, opts.speaker_labels, &mut blocks);
+                    collect_result(result, opts.speaker_labels, lang, &mut blocks);
                 }
             }
         }
     }
 
     if opts.speaker_labels {
-        Ok(merge_speaker_lines(&blocks))
+        Ok(merge_speaker_lines(&blocks, lang))
     } else {
         Ok(blocks.join("\n"))
     }
@@ -230,7 +251,7 @@ pub(crate) fn flac_to_pcm_bytes(flac_bytes: Vec<u8>) -> Result<Vec<u8>, String> 
         MAX_AUDIO_SECONDS,
         &tokio_util::sync::CancellationToken::new(),
     )
-    .map_err(|e| format!("{}: 解码音频失败: {}", LABEL, e))?;
+    .map_err(|e| tr_fmt("err.audioDecode", &[("label", LABEL), ("error", e.as_str())]))?;
     let mut bytes = Vec::with_capacity(pcm.len() * 2);
     for sample in pcm {
         bytes.extend_from_slice(&sample.to_le_bytes());
@@ -245,10 +266,11 @@ pub async fn transcribe(
     opts: TranscribeOptions,
 ) -> Result<String, String> {
     if flac_bytes.is_empty() {
-        return Err(format!("{}: 音频为空", LABEL));
+        return Err(tr_fmt("err.audioEmpty", &[("label", LABEL)]));
     }
     let pcm = flac_to_pcm_bytes(flac_bytes)?;
-    run_stream(cfg, pcm, MediaEncoding::Pcm, opts).await
+    // 只在公开入口读一次当前语言，内部函数都显式传 lang，方便单测指定
+    run_stream(cfg, pcm, MediaEncoding::Pcm, opts, i18n::current()).await
 }
 
 /// 连通性测试：送 0.5 秒静音 PCM，能正常走完流即视为凭证、region、权限都可用。
@@ -259,6 +281,7 @@ pub async fn test_connectivity(cfg: &AwsConfig) -> Result<(), String> {
         silence,
         MediaEncoding::Pcm,
         TranscribeOptions::default(),
+        i18n::current(),
     )
     .await
     .map(|_| ())
@@ -298,9 +321,20 @@ mod tests {
             item("。", Some("1"), true),
         ];
         assert_eq!(
-            render_speaker_lines(&items),
+            render_speaker_lines(&items, Lang::ZhCn),
             "说话人1：我们today test。\n说话人2：好的。"
         );
+        assert_eq!(
+            render_speaker_lines(&items, Lang::En),
+            "Speaker 1: 我们today test。\nSpeaker 2: 好的。"
+        );
+    }
+
+    #[test]
+    fn unknown_speaker_gets_plain_prefix() {
+        let items = vec![item("hello", None, false)];
+        assert_eq!(render_speaker_lines(&items, Lang::ZhCn), "说话人：hello");
+        assert_eq!(render_speaker_lines(&items, Lang::En), "Speaker: hello");
     }
 
     #[test]
@@ -311,9 +345,34 @@ mod tests {
             "说话人2：继续。".to_string(),
         ];
         assert_eq!(
-            merge_speaker_lines(&blocks),
+            merge_speaker_lines(&blocks, Lang::ZhCn),
             "说话人1：第一句。第二句。\n说话人2：回应。继续。"
         );
+    }
+
+    #[test]
+    fn spaces_english_sentences_but_not_chinese() {
+        assert!(needs_space("first.", "Second"));
+        assert!(needs_space("hello", "world"));
+        assert!(!needs_space("你好。", "再见"));
+        assert!(!needs_space("hello", "."));
+        assert!(!needs_space("你好", "world"));
+    }
+
+    #[test]
+    fn merges_english_speaker_lines_on_ascii_separator() {
+        let blocks = vec![
+            "Speaker 1: first".to_string(),
+            "Speaker 1: second\nSpeaker 2: reply: yes".to_string(),
+            "Speaker 2: more".to_string(),
+        ];
+        assert_eq!(
+            merge_speaker_lines(&blocks, Lang::En),
+            "Speaker 1: first second\nSpeaker 2: reply: yes more"
+        );
+        // 中文分隔符的行在英文模式下不会被误切
+        let zh = vec!["说话人1：你好".to_string()];
+        assert_eq!(merge_speaker_lines(&zh, Lang::En), "说话人1：你好");
     }
 
     /// 真机联调：需要本机 AWS profile 有 Transcribe 权限，以及一段 16 kHz 单声道 WAV。
@@ -369,7 +428,7 @@ mod tests {
         .expect("transcribe with speaker labels");
         eprintln!("[live] transcribe(speaker labels) → {:?}", labelled);
         assert!(
-            labelled.starts_with("说话人"),
+            labelled.starts_with(tr_in(i18n::current(), "speaker.unknown")),
             "expected speaker prefix: {labelled}"
         );
     }

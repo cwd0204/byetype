@@ -144,9 +144,6 @@ impl AppConfig {
         if self.local_api.port < 1024 {
             return Err("本机接口端口必须在 1024 到 65535 之间".to_string());
         }
-        if self.models.custom.iter().any(|model| !model.chat_template_kwargs.is_object()) {
-            return Err("chat_template_kwargs 必须是 JSON 对象".to_string());
-        }
         let meeting = &self.meeting;
         if !(60..=600).contains(&meeting.chunk_seconds) {
             return Err("会议分段时长必须在 60 到 600 秒之间".to_string());
@@ -168,8 +165,8 @@ fn default_true() -> bool {
     true
 }
 
-fn default_chat_template_kwargs() -> serde_json::Value {
-    serde_json::json!({})
+fn default_language() -> String {
+    "system".to_string()
 }
 
 fn default_max_recording_seconds() -> u32 {
@@ -206,6 +203,9 @@ pub struct GeneralConfig {
     pub shortcut: String,
     pub launch_at_login: bool,
     pub theme: String,
+    /// 界面语言："system"（跟随系统）| "zh-CN" | "en"
+    #[serde(default = "default_language")]
+    pub language: String,
     #[serde(default = "default_max_recording_seconds")]
     pub max_recording_seconds: u32,
     #[serde(default = "default_microphone")]
@@ -238,28 +238,14 @@ pub struct GeneralConfig {
     pub overwrite_clipboard: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsConfig {
-    pub builtin_api_keys: BuiltinApiKeys,
+    /// 用户自建的 Bedrock 模型（任意模型 / 推理配置 id）
     #[serde(default)]
     pub custom: Vec<CustomModelEntry>,
     #[serde(default)]
     pub aws: AwsConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuiltinApiKeys {
-    pub gemini: String,
-    #[serde(default)]
-    pub deepseek: String,
-    #[serde(default)]
-    pub dashscope: String,
-    #[serde(default)]
-    pub openrouter: String,
-    #[serde(default)]
-    pub mimo: String,
 }
 
 /// AWS 接入：只存 profile 名与 region，凭证由本机 ~/.aws/config 的凭证链提供
@@ -309,27 +295,16 @@ impl Default for AwsConfig {
 #[serde(rename_all = "camelCase")]
 pub struct CustomModelEntry {
     pub id: String,
+    /// 显示名（用量统计里的服务商列）
     pub provider: String,
+    /// Bedrock 模型 id 或跨区推理配置 id，如 global.amazon.nova-2-lite-v1:0
     pub model: String,
+    /// 只允许 "bedrock"；旧配置里其他协议的条目在迁移时被丢弃
     pub protocol: String,
-    pub base_url: String,
-    pub api_key: String,
-    #[serde(default)]
-    pub audio_input_mode: AudioInputMode,
-    #[serde(default = "default_chat_template_kwargs")]
-    pub chat_template_kwargs: serde_json::Value,
-    pub supports_audio: bool,
+    #[serde(default = "default_true")]
     pub supports_text: bool,
     #[serde(default = "default_true")]
     pub supports_vision: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AudioInputMode {
-    #[default]
-    InputAudio,
-    AudioUrl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,16 +342,13 @@ pub struct VoiceLearningConfig {
     pub model_id: String,
     #[serde(default)]
     pub thinking: ThinkingConfig,
-    #[serde(default)]
-    pub deepseek_reasoning_effort: Option<String>,
 }
 
 impl Default for VoiceLearningConfig {
     fn default() -> Self {
         Self {
-            model_id: "builtin-gemini-3.8-flash".to_string(),
+            model_id: crate::ai::models::DEFAULT_TEXT_MODEL.to_string(),
             thinking: ThinkingConfig::default(),
-            deepseek_reasoning_effort: None,
         }
     }
 }
@@ -397,10 +369,6 @@ pub struct VoiceTemplatesConfig {
     pub thinking: ThinkingConfig,
     #[serde(default = "default_voice_templates")]
     pub templates: Vec<TemplateEntry>,
-    /// DeepSeek 专用:reasoning_effort,取值 "low" / "high" / "max"。
-    /// 仅在 model_id 指向 DeepSeek 且 thinking.enabled=true 时生效。
-    #[serde(default)]
-    pub deepseek_reasoning_effort: Option<String>,
     /// 优化阶段是否再带一遍转写参考(规则/专有词汇/自动学习结果)做二次纠错。
     /// 适合转写纠错较弱的模型;强模型转写阶段已纠对,关闭可省 token 并避免过度改写。
     #[serde(default)]
@@ -504,6 +472,7 @@ impl Default for AppConfig {
                 shortcut: "F4".to_string(),
                 launch_at_login: false,
                 theme: "system".to_string(),
+                language: default_language(),
                 max_recording_seconds: 180,
                 microphone: "system-default".to_string(),
                 extract_shortcut: "F6".to_string(),
@@ -521,19 +490,9 @@ impl Default for AppConfig {
                 overwrite_clipboard: true,
             },
             local_api: LocalApiConfig::default(),
-            models: ModelsConfig {
-                builtin_api_keys: BuiltinApiKeys {
-                    gemini: String::new(),
-                    deepseek: String::new(),
-                    dashscope: String::new(),
-                    openrouter: String::new(),
-                    mimo: String::new(),
-                },
-                custom: Vec::new(),
-                aws: AwsConfig::default(),
-            },
+            models: ModelsConfig::default(),
             transcribe: TranscribeConfig {
-                model_id: "builtin-gemini-3.8-flash".to_string(),
+                model_id: crate::ai::models::DEFAULT_TRANSCRIBE_MODEL.to_string(),
                 thinking: ThinkingConfig {
                     enabled: false,
                     level: "LOW".to_string(),
@@ -546,19 +505,19 @@ impl Default for AppConfig {
             },
             voice_learning: VoiceLearningConfig::default(),
             voice_templates: VoiceTemplatesConfig {
-                model_id: String::new(),
+                model_id: crate::ai::models::DEFAULT_TEXT_MODEL.to_string(),
                 thinking: ThinkingConfig {
                     enabled: false,
                     level: "LOW".to_string(),
                 },
                 templates: default_voice_templates(),
-                deepseek_reasoning_effort: None,
                 reuse_transcribe_references: false,
             },
             extract: ExtractConfig::default(),
             advanced: AdvancedConfig {
-                transcribe_timeout: 10,
-                optimize_timeout: 10,
+                // Transcribe 流式识别比多模态模型慢，Claude 开思考时也需要更长时间
+                transcribe_timeout: 60,
+                optimize_timeout: 30,
                 max_retries: 3,
                 max_parallel: 3,
                 proxy_enabled: true,
@@ -670,72 +629,40 @@ mod local_api_tests {
 
         let config: AppConfig = serde_json::from_value(value).unwrap();
 
-        assert_eq!(config.voice_learning.model_id, "builtin-gemini-3.8-flash");
+        assert_eq!(config.voice_learning.model_id, crate::ai::models::DEFAULT_TEXT_MODEL);
         assert!(!config.voice_learning.thinking.enabled);
     }
 
     #[test]
-    fn existing_custom_model_defaults_to_input_audio() {
+    fn custom_model_ignores_legacy_provider_fields() {
         let value = serde_json::json!({
             "id": "legacy-model",
             "provider": "custom",
-            "model": "audio-model",
-            "protocol": "openai-compat",
-            "baseUrl": "https://example.com/v1",
-            "apiKey": "test",
-            "supportsAudio": true,
-            "supportsText": true,
-            "supportsVision": false
-        });
-
-        let model: CustomModelEntry = serde_json::from_value(value).unwrap();
-
-        assert_eq!(model.audio_input_mode, AudioInputMode::InputAudio);
-        assert_eq!(model.chat_template_kwargs, serde_json::json!({}));
-    }
-
-    #[test]
-    fn custom_model_accepts_audio_url_mode() {
-        let value = serde_json::json!({
-            "id": "url-model",
-            "provider": "custom",
-            "model": "audio-model",
-            "protocol": "openai-compat",
+            "model": "global.amazon.nova-2-lite-v1:0",
+            "protocol": "bedrock",
             "baseUrl": "https://example.com/v1",
             "apiKey": "test",
             "audioInputMode": "audio_url",
             "chatTemplateKwargs": {"enable_thinking": false},
-            "supportsAudio": true,
-            "supportsText": true,
-            "supportsVision": false
+            "supportsAudio": true
         });
 
         let model: CustomModelEntry = serde_json::from_value(value).unwrap();
 
-        assert_eq!(model.audio_input_mode, AudioInputMode::AudioUrl);
-        assert_eq!(model.chat_template_kwargs, serde_json::json!({"enable_thinking": false}));
+        assert_eq!(model.protocol, "bedrock");
+        assert!(model.supports_text);
+        assert!(model.supports_vision);
     }
 
     #[test]
-    fn rejects_non_object_chat_template_kwargs() {
-        let mut config = AppConfig::default();
-        let value = serde_json::json!({
-            "id": "invalid-kwargs",
-            "provider": "custom",
-            "model": "audio-model",
-            "protocol": "openai-compat",
-            "baseUrl": "https://example.com/v1",
-            "apiKey": "test",
-            "chatTemplateKwargs": [],
-            "supportsAudio": true,
-            "supportsText": true,
-            "supportsVision": false
-        });
-        config.models.custom.push(serde_json::from_value(value).unwrap());
-
-        assert_eq!(
-            config.validate(),
-            Err("chat_template_kwargs 必须是 JSON 对象".to_string())
-        );
+    fn defaults_are_aws_only_with_relaxed_timeouts() {
+        let config = AppConfig::default();
+        assert_eq!(config.transcribe.model_id, crate::ai::models::DEFAULT_TRANSCRIBE_MODEL);
+        assert_eq!(config.voice_templates.model_id, crate::ai::models::DEFAULT_TEXT_MODEL);
+        assert_eq!(config.advanced.transcribe_timeout, 60);
+        assert_eq!(config.advanced.optimize_timeout, 30);
+        assert_eq!(config.general.language, "system");
+        assert!(config.validate().is_ok());
     }
+
 }

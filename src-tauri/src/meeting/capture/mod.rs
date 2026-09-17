@@ -188,7 +188,6 @@ fn deliver(sink: &CaptureSink, segment: PcmSegment) {
                 start_offset_secs: segment.start_offset_secs,
                 duration_secs: segment.duration_secs,
                 flac,
-                speaker_hints: segment.speaker_hints,
             };
             if sink.tx.blocking_send(chunk).is_err() {
                 sink.pending.fetch_sub(1, Ordering::SeqCst);

@@ -95,6 +95,11 @@ pub async fn save_config(
         }
     }
 
+    // 语言变了：重设当前语言，刷新窗口标题与托盘文案
+    if config.general.language != old_config.general.language {
+        crate::i18n::apply_language(&app);
+    }
+
     Ok(true)
 }
 
@@ -289,82 +294,29 @@ pub async fn test_model_connectivity(
 ) -> Result<ConnectivityResult, String> {
     let config = config_manager.get();
     let resolved = ai::models::resolve_model(&config, &model_id)?;
-    let is_aws = ai::models::is_aws_protocol(&resolved.protocol);
-
-    // AWS 协议不用 API Key,凭证来自本机 profile
-    if resolved.api_key.is_empty() && !is_aws {
-        return Ok(ConnectivityResult {
-            success: false,
-            latency_ms: 0,
-            error: Some("请先填写 API Key".to_string()),
-        });
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
     let start = std::time::Instant::now();
 
-    if is_aws {
-        let test = async {
-            match resolved.protocol.as_str() {
-                ai::models::PROTOCOL_BEDROCK => {
-                    ai::bedrock::test_connectivity(&config.models.aws, &resolved.model).await
-                }
-                _ => ai::transcribe_aws::test_connectivity(&config.models.aws).await,
+    // 凭证来自本机 AWS profile，不需要 API Key
+    let test = async {
+        match resolved.protocol.as_str() {
+            ai::models::PROTOCOL_BEDROCK => {
+                ai::bedrock::test_connectivity(&config.models.aws, &resolved.model).await
             }
-        };
-        // SDK 的超时不受上面 reqwest client 约束,这里单独兜底
-        let result = match tokio::time::timeout(std::time::Duration::from_secs(30), test).await {
-            Ok(result) => result,
-            Err(_) => Err("AWS 请求超时(30 秒)".to_string()),
-        };
-        let latency = start.elapsed().as_millis() as u64;
-        return match result {
-            Ok(()) => Ok(ConnectivityResult { success: true, latency_ms: latency, error: None }),
-            Err(e) => Ok(ConnectivityResult { success: false, latency_ms: latency, error: Some(e) }),
-        };
-    }
-
-    if ai::is_deepseek(&resolved) {
-        let result = ai::deepseek::test_connectivity(
-            &client,
-            &resolved.api_key,
-            &resolved.model,
-            &resolved.base_url,
-        )
-        .await;
-        let latency = start.elapsed().as_millis() as u64;
-        return match result {
-            Ok(()) => Ok(ConnectivityResult { success: true, latency_ms: latency, error: None }),
-            Err(e) => Ok(ConnectivityResult { success: false, latency_ms: latency, error: Some(e) }),
-        };
-    }
-
-    let result = match resolved.protocol.as_str() {
-        "gemini" => {
-            ai::gemini::test_connectivity(&client, &resolved.api_key, &resolved.model, &resolved.base_url).await
-        }
-        "qwen-omni" => {
-            ai::openai_compat::qwen_omni_test_connectivity(&client, &resolved.api_key, &resolved.model, &resolved.base_url).await
-        }
-        "mimo" => {
-            ai::mimo::test_connectivity(&client, &resolved.api_key, &resolved.model, &resolved.base_url).await
-        }
-        _ => {
-            ai::openai_compat::test_connectivity(
-                &client,
-                &resolved.api_key,
-                &resolved.model,
-                &resolved.base_url,
-                resolved.chat_template_kwargs.as_ref(),
-            ).await
+            ai::models::PROTOCOL_AWS_TRANSCRIBE => {
+                ai::transcribe_aws::test_connectivity(&config.models.aws).await
+            }
+            other => Err(crate::i18n::tr_fmt(
+                "err.unsupportedProtocol",
+                &[("protocol", other)],
+            )),
         }
     };
-
+    // SDK 自己的超时较长，这里单独兜底
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(30), test).await {
+        Ok(result) => result,
+        Err(_) => Err(crate::i18n::tr("err.awsTimeout").to_string()),
+    };
     let latency = start.elapsed().as_millis() as u64;
-
     match result {
         Ok(()) => Ok(ConnectivityResult { success: true, latency_ms: latency, error: None }),
         Err(e) => Ok(ConnectivityResult { success: false, latency_ms: latency, error: Some(e) }),

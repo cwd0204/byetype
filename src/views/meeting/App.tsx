@@ -15,8 +15,17 @@ import {
   startMeeting,
   stopMeeting,
 } from '../../lib/tauri-api'
+import { t, useLang } from '../../i18n'
+import { bootstrapLanguage } from '../../i18n/tauri'
 
 type Tab = 'summary' | 'transcript'
+
+/** 底部提示：前端文案存 key（切语言后能重译），后端返回的原文直接存字符串 */
+type Notice = string | { key: string; vars?: Record<string, string | number> }
+
+function noticeText(notice: Notice): string {
+  return typeof notice === 'string' ? notice : t(notice.key, notice.vars)
+}
 
 function fmtHms(secs: number): string {
   const h = Math.floor(secs / 3600)
@@ -35,12 +44,12 @@ function fmtDate(iso: string): string {
 
 function statusLabel(status: MeetingMeta['status']): string {
   switch (status) {
-    case 'recording': return '录制中'
-    case 'finalizing': return '生成纪要中'
-    case 'done': return '已完成'
-    case 'summary_failed': return '纪要失败'
-    case 'failed': return '失败'
-    case 'interrupted': return '已中断'
+    case 'recording': return t('meetingWindow.status.recording')
+    case 'finalizing': return t('meetingWindow.status.finalizing')
+    case 'done': return t('meetingWindow.status.done')
+    case 'summary_failed': return t('meetingWindow.status.summaryFailed')
+    case 'failed': return t('meetingWindow.status.failed')
+    case 'interrupted': return t('meetingWindow.status.interrupted')
     default: return status
   }
 }
@@ -106,6 +115,7 @@ function renderMarkdown(md: string) {
 }
 
 export default function App() {
+  const lang = useLang()
   const [meetings, setMeetings] = useState<MeetingMeta[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<MeetingDetail | null>(null)
@@ -115,7 +125,7 @@ export default function App() {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
-  const [notice, setNotice] = useState('')
+  const [notice, setNotice] = useState<Notice>('')
   const transcriptEndRef = useRef<HTMLDivElement | null>(null)
   const selectedIdRef = useRef<string | null>(null)
   selectedIdRef.current = selectedId
@@ -128,6 +138,10 @@ export default function App() {
       else delete document.documentElement.dataset.theme
     }).catch(() => {})
   }, [])
+
+  // 语言跟随设置；窗口标题随语言切换
+  useEffect(() => bootstrapLanguage(), [])
+  useEffect(() => { document.title = t('meetingWindow.title') }, [lang])
 
   const refreshList = useCallback(async () => {
     try {
@@ -165,7 +179,9 @@ export default function App() {
       setDetail(prev => prev ? { ...prev, segments: [...prev.segments.filter(s => s.index !== segment.index), segment].sort((a, b) => a.index - b.index) } : prev)
     })
     listen<{ meetingId: string; ok: boolean; error?: string | null; notesPath?: string | null }>('meeting-finished', p => {
-      setNotice(p.ok ? (p.notesPath ? `纪要已保存到 ${p.notesPath}` : '纪要已生成') : `纪要生成失败：${p.error ?? ''}`)
+      setNotice(p.ok
+        ? (p.notesPath ? { key: 'meetingWindow.footer.saved', vars: { path: p.notesPath } } : { key: 'meetingWindow.footer.generated' })
+        : { key: 'meetingWindow.footer.generateFailed', vars: { error: p.error ?? '' } })
       refreshList(); refreshDetail(selectedIdRef.current)
     })
     listen<{ meetingId: string | null }>('meeting-open', ({ meetingId }) => {
@@ -201,7 +217,7 @@ export default function App() {
     try {
       await action()
     } catch (e) {
-      setNotice(typeof e === 'string' ? e : (e as Error)?.message ?? '操作失败')
+      setNotice(typeof e === 'string' ? e : (e as Error)?.message ?? { key: 'meetingWindow.footer.actionFailed' })
     } finally {
       setBusy(null)
     }
@@ -214,21 +230,21 @@ export default function App() {
     <div className="meeting-app">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h1>会议记录</h1>
+          <h1>{t('meetingWindow.title')}</h1>
           {status?.phase === 'recording' ? (
-            <button className="btn small danger" disabled={busy !== null} onClick={() => run('stop', stopMeeting)}>停止 {fmtHms(status.elapsedSecs)}</button>
+            <button className="btn small danger" disabled={busy !== null} onClick={() => run('stop', stopMeeting)}>{t('meetingWindow.stopWithElapsed', { elapsed: fmtHms(status.elapsedSecs) })}</button>
           ) : status?.phase === 'finalizing' ? (
-            <span className="warning-text">生成纪要中…</span>
+            <span className="warning-text">{t('meetingWindow.finalizingShort')}</span>
           ) : (
-            <button className="btn small primary" disabled={busy !== null} onClick={() => run('start', startMeeting)}>开始录制</button>
+            <button className="btn small primary" disabled={busy !== null} onClick={() => run('start', startMeeting)}>{t('meetingWindow.startRecording')}</button>
           )}
         </div>
-        <input className="sidebar-search" placeholder="搜索标题" value={query} onChange={e => setQuery(e.target.value)} />
+        <input className="sidebar-search" placeholder={t('meetingWindow.searchPlaceholder')} value={query} onChange={e => setQuery(e.target.value)} />
         <div className="meeting-list">
-          {filtered.length === 0 && <div className="empty" style={{ marginTop: 40 }}>还没有会议记录<br />开 Zoom 会议会自动开始，或点「开始录制」</div>}
+          {filtered.length === 0 && <div className="empty" style={{ marginTop: 40 }}>{t('meetingWindow.emptyList.line1')}<br />{t('meetingWindow.emptyList.line2')}</div>}
           {filtered.map(m => (
             <button key={m.id} className={`meeting-item${m.id === selectedId ? ' active' : ''}`} onClick={() => setSelectedId(m.id)}>
-              <span className="title">{m.title || '会议记录'}</span>
+              <span className="title">{m.title || t('meetingWindow.untitled')}</span>
               <span className="sub">
                 <span>{fmtDate(m.startedAt)}</span>
                 {m.durationSecs > 0 && <span>{fmtHms(m.durationSecs)}</span>}
@@ -242,46 +258,46 @@ export default function App() {
 
       <main className="main">
         {!meta ? (
-          <div className="content"><div className="empty">选择左侧的一场会议查看纪要与转写</div></div>
+          <div className="content"><div className="empty">{t('meetingWindow.selectHint')}</div></div>
         ) : (
           <>
             <div className="main-header">
               <div className="title-row">
-                <h2>{meta.title || '会议记录'}</h2>
+                <h2>{meta.title || t('meetingWindow.untitled')}</h2>
                 <div className="toolbar">
                   {isLive && status?.phase === 'recording' && (
                     <>
-                      <button className="btn danger" disabled={busy !== null} onClick={() => run('stop', stopMeeting)}>停止并生成纪要</button>
-                      <button className="btn" disabled={busy !== null} onClick={() => { if (confirm('丢弃这次录制？转写内容会一并删除。')) run('discard', discardMeeting) }}>丢弃</button>
+                      <button className="btn danger" disabled={busy !== null} onClick={() => run('stop', stopMeeting)}>{t('meetingWindow.stopAndSummarize')}</button>
+                      <button className="btn" disabled={busy !== null} onClick={() => { if (confirm(t('meetingWindow.confirmDiscard'))) run('discard', discardMeeting) }}>{t('meetingWindow.discard')}</button>
                     </>
                   )}
                   {!isLive && (
                     <>
                       {(meta.status === 'summary_failed' || meta.status === 'interrupted' || meta.status === 'done') && (
-                        <button className="btn" disabled={busy !== null} onClick={() => run('regen', () => regenerateMeetingSummary(meta.id))}>{meta.status === 'done' ? '重新生成纪要' : '生成纪要'}</button>
+                        <button className="btn" disabled={busy !== null} onClick={() => run('regen', () => regenerateMeetingSummary(meta.id))}>{meta.status === 'done' ? t('meetingWindow.regenerateSummary') : t('meetingWindow.generateSummary')}</button>
                       )}
-                      <button className="btn" onClick={() => revealMeeting(meta.id).catch(() => {})}>在 Finder 中显示</button>
-                      <button className="btn danger" disabled={busy !== null} onClick={() => { if (confirm('删除这场会议的全部记录？')) run('delete', async () => { await deleteMeeting(meta.id); setSelectedId(null); await refreshList() }) }}>删除</button>
+                      <button className="btn" onClick={() => revealMeeting(meta.id).catch(() => {})}>{t('meetingWindow.revealInFinder')}</button>
+                      <button className="btn danger" disabled={busy !== null} onClick={() => { if (confirm(t('meetingWindow.confirmDelete'))) run('delete', async () => { await deleteMeeting(meta.id); setSelectedId(null); await refreshList() }) }}>{t('common.delete')}</button>
                     </>
                   )}
                 </div>
               </div>
               <div className="meta-row">
-                {isLive && status?.phase === 'recording' && <span className="live-badge"><span className="status-dot recording" />录制中 {fmtHms(status.elapsedSecs)}</span>}
-                {isLive && status?.phase === 'finalizing' && <span className="warning-text">正在生成会议纪要…</span>}
+                {isLive && status?.phase === 'recording' && <span className="live-badge"><span className="status-dot recording" />{t('meetingWindow.liveRecording', { elapsed: fmtHms(status.elapsedSecs) })}</span>}
+                {isLive && status?.phase === 'finalizing' && <span className="warning-text">{t('meetingWindow.finalizingLong')}</span>}
                 <span>{fmtDate(meta.startedAt)}</span>
-                {meta.durationSecs > 0 && <span>时长 {fmtHms(meta.durationSecs)}</span>}
-                <span>{meta.source === 'auto' ? 'Zoom 自动' : '手动'}</span>
-                <span>{[meta.microphone && '麦克风', meta.systemAudio && '系统音频'].filter(Boolean).join(' + ') || '无音源'}</span>
-                {isLive && status && status.chunksPending > 0 && <span>转写队列 {status.chunksPending}</span>}
-                {status?.warnings?.length && isLive ? <span className="warning-text">{status.warnings.join('；')}</span> : null}
+                {meta.durationSecs > 0 && <span>{t('meetingWindow.duration', { duration: fmtHms(meta.durationSecs) })}</span>}
+                <span>{meta.source === 'auto' ? t('meetingWindow.source.auto') : t('meetingWindow.source.manual')}</span>
+                <span>{[meta.microphone && t('meetingWindow.audio.microphone'), meta.systemAudio && t('meetingWindow.audio.systemAudio')].filter(Boolean).join(' + ') || t('meetingWindow.audio.none')}</span>
+                {isLive && status && status.chunksPending > 0 && <span>{t('meetingWindow.transcribeQueue', { count: status.chunksPending })}</span>}
+                {status?.warnings?.length && isLive ? <span className="warning-text">{status.warnings.join(t('meetingWindow.listSeparator'))}</span> : null}
                 {meta.error && !isLive && <span className="error-text">{meta.error}</span>}
               </div>
             </div>
 
             <div className="tabs">
-              <button className={`tab${tab === 'summary' ? ' active' : ''}`} onClick={() => setTab('summary')}>纪要</button>
-              <button className={`tab${tab === 'transcript' ? ' active' : ''}`} onClick={() => setTab('transcript')}>转写{detail && detail.segments.length > 0 ? `（${detail.segments.length} 段）` : ''}</button>
+              <button className={`tab${tab === 'summary' ? ' active' : ''}`} onClick={() => setTab('summary')}>{t('meetingWindow.tab.summary')}</button>
+              <button className={`tab${tab === 'transcript' ? ' active' : ''}`} onClick={() => setTab('transcript')}>{detail && detail.segments.length > 0 ? t('meetingWindow.tab.transcriptWithCount', { count: detail.segments.length }) : t('meetingWindow.tab.transcript')}</button>
             </div>
 
             <div className="content">
@@ -290,22 +306,22 @@ export default function App() {
                   {editing ? (
                     <>
                       <div className="toolbar" style={{ marginBottom: 10 }}>
-                        <button className="btn primary" disabled={busy !== null} onClick={() => run('save', async () => { await saveMeetingSummary(meta.id, draft); setEditing(false); await refreshDetail(meta.id) })}>保存</button>
-                        <button className="btn" onClick={() => setEditing(false)}>取消</button>
+                        <button className="btn primary" disabled={busy !== null} onClick={() => run('save', async () => { await saveMeetingSummary(meta.id, draft); setEditing(false); await refreshDetail(meta.id) })}>{t('common.save')}</button>
+                        <button className="btn" onClick={() => setEditing(false)}>{t('common.cancel')}</button>
                       </div>
                       <textarea className="summary-editor" value={draft} onChange={e => setDraft(e.target.value)} spellCheck={false} />
                     </>
                   ) : detail?.summary ? (
                     <>
                       <div className="toolbar" style={{ marginBottom: 10 }}>
-                        <button className="btn small" onClick={() => { setDraft(detail.summary ?? ''); setEditing(true) }}>编辑</button>
-                        <button className="btn small" onClick={() => { navigator.clipboard.writeText(detail.summary ?? '').then(() => setNotice('纪要已复制')).catch(() => {}) }}>复制</button>
+                        <button className="btn small" onClick={() => { setDraft(detail.summary ?? ''); setEditing(true) }}>{t('common.edit')}</button>
+                        <button className="btn small" onClick={() => { navigator.clipboard.writeText(detail.summary ?? '').then(() => setNotice({ key: 'meetingWindow.summaryCopied' })).catch(() => {}) }}>{t('common.copy')}</button>
                       </div>
                       <div className="summary">{renderMarkdown(detail.summary)}</div>
                     </>
                   ) : (
                     <div className="empty">
-                      {meta.status === 'recording' ? '会议结束后会自动生成纪要' : meta.status === 'finalizing' ? '正在生成纪要…' : '还没有纪要'}
+                      {meta.status === 'recording' ? t('meetingWindow.summaryEmpty.recording') : meta.status === 'finalizing' ? t('meetingWindow.summaryEmpty.finalizing') : t('meetingWindow.summaryEmpty.none')}
                     </div>
                   )}
                 </>
@@ -313,7 +329,7 @@ export default function App() {
               {tab === 'transcript' && (
                 <>
                   {detail && detail.segments.length === 0 && (
-                    <div className="empty">{meta.status === 'recording' ? '第一段音频还在录制中，稍后出现转写' : '没有转写内容'}</div>
+                    <div className="empty">{meta.status === 'recording' ? t('meetingWindow.transcriptEmpty.recording') : t('meetingWindow.transcriptEmpty.none')}</div>
                   )}
                   {detail?.segments.map(seg => (
                     <div key={seg.index} className={`segment${seg.failed ? ' failed' : ''}`}>
@@ -322,14 +338,18 @@ export default function App() {
                     </div>
                   ))}
                   {isLive && status?.phase === 'recording' && (
-                    <div className="pending-note">{status.chunksPending > 0 ? `第 ${detail ? detail.segments.length + 1 : 1} 段转写中…` : '录制中…'}</div>
+                    <div className="pending-note">{status.chunksPending > 0 ? t('meetingWindow.pending.transcribing', { index: detail ? detail.segments.length + 1 : 1 }) : t('meetingWindow.pending.recording')}</div>
                   )}
                   <div ref={transcriptEndRef} />
                 </>
               )}
             </div>
             <div className="footer-note" title={meta.notesPath ?? ''}>
-              {notice || (meta.notesPath ? `笔记已导出到 ${meta.notesPath}` : `转写模型 ${meta.transcribeModel || '-'}${meta.summaryModel ? ` · 纪要模型 ${meta.summaryModel}` : ''}`)}
+              {noticeText(notice) || (meta.notesPath
+                ? t('meetingWindow.footer.exported', { path: meta.notesPath })
+                : meta.summaryModel
+                  ? t('meetingWindow.footer.modelsWithSummary', { transcribe: meta.transcribeModel || '-', summary: meta.summaryModel })
+                  : t('meetingWindow.footer.models', { transcribe: meta.transcribeModel || '-' }))}
             </div>
           </>
         )}
