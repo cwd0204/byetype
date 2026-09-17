@@ -2,6 +2,7 @@ pub mod history;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -150,6 +151,9 @@ struct PipelineOutput {
     optimize_provider: Option<String>,
     transcribe_ms: u64,
     optimize_ms: u64,
+    /// 各阶段实际尝试次数：流式转写那一次也算，被超时掐掉的也算。
+    transcribe_attempts: u32,
+    optimize_attempts: u32,
 }
 
 struct PipelineFailure {
@@ -433,6 +437,9 @@ async fn run_pipeline(
                 transcribe_provider: output.transcribe_provider,
                 optimize_model: output.optimize_model,
                 optimize_provider: output.optimize_provider,
+                // 只在真的重试过时写，一次成功的记录和以前长得一样。
+                transcribe_attempts: Some(output.transcribe_attempts).filter(|&n| n > 1),
+                optimize_attempts: Some(output.optimize_attempts).filter(|&n| n > 1),
             });
         }
         Err(e) => eprintln!("[TaskManager] Paste failed: {}", e),
@@ -508,11 +515,15 @@ async fn execute_pipeline(
     observer(PipelineEvent::Transcribing);
     let retry_observer = observer.clone();
     let transcribe_started = std::time::Instant::now();
+    // 尝试次数进 timing.jsonl，让「耗时很长」能和「重试过」对上号。
+    // 流式那一次也算：它失败后回退整段路径，对用户来说就是又跑了一遍。
+    let mut transcribe_attempts: u32 = 0;
 
     // 流式路径：录音时就在识别了，这里只等尾段最终结果。失败或结果为空都返回
     // None，落到下面的整段路径重做一次 —— 用户只会觉得慢，不会看到失败。
     let live_output = match live {
         Some(live) => {
+            transcribe_attempts += 1;
             tokio::select! {
                 output = await_live_transcribe(&config, live) => output,
                 _ = token.cancelled() => return Err(PipelineFailure {
@@ -529,44 +540,55 @@ async fn execute_pipeline(
         // 整段路径：把录好的 FLAC 一次性传上去。这条路要带 with_retry，
         // 网络抖动重发一次还有意义（流式那条重试只能重新录音，所以不套）。
         None => {
-            let client = client.clone();
-            let audio = audio_base64.clone();
-            let config = config.clone();
-            let prompts_dir = prompts_dir.clone();
-            let learning_rules = learning_rules.clone();
-            tokio::select! {
-                result = ai::retry::with_retry(
-                    || {
-                        let client = client.clone();
-                        let audio = audio.clone();
-                        let config = config.clone();
-                        let prompts_dir = prompts_dir.clone();
-                        let learning_rules = learning_rules.clone();
-                        async move {
-                            ai::transcribe(
-                                &client,
-                                &audio,
-                                &config,
-                                &prompts_dir,
-                                &learning_rules,
-                            )
-                            .await
-                        }
-                    },
-                    config.advanced.max_retries,
-                    config.advanced.transcribe_timeout,
-                    move |_| retry_observer(PipelineEvent::Retrying),
-                ) => result,
-                _ = token.cancelled() => return Err(PipelineFailure {
-                    message: "任务已取消".to_string(),
-                    transcribe_text: None,
-                }),
-            }
+            transcribe_attempts += 1;
+            // with_retry 每失败一次回调一次 n（= 到目前为止失败的次数），
+            // 最后一次的 n 就是重试次数。
+            let retries = Arc::new(AtomicU32::new(0));
+            let result = {
+                let retry_count = retries.clone();
+                let client = client.clone();
+                let audio = audio_base64.clone();
+                let config = config.clone();
+                let prompts_dir = prompts_dir.clone();
+                let learning_rules = learning_rules.clone();
+                tokio::select! {
+                    result = ai::retry::with_retry(
+                        || {
+                            let client = client.clone();
+                            let audio = audio.clone();
+                            let config = config.clone();
+                            let prompts_dir = prompts_dir.clone();
+                            let learning_rules = learning_rules.clone();
+                            async move {
+                                ai::transcribe(
+                                    &client,
+                                    &audio,
+                                    &config,
+                                    &prompts_dir,
+                                    &learning_rules,
+                                )
+                                .await
+                            }
+                        },
+                        config.advanced.max_retries,
+                        config.advanced.transcribe_timeout,
+                        move |n| {
+                            retry_count.store(n, Ordering::SeqCst);
+                            retry_observer(PipelineEvent::Retrying)
+                        },
+                    ) => result,
+                    _ = token.cancelled() => return Err(PipelineFailure {
+                        message: "任务已取消".to_string(),
+                        transcribe_text: None,
+                    }),
+                }
+            };
+            transcribe_attempts += retries.load(Ordering::SeqCst);
+            result.map_err(|message| PipelineFailure {
+                message,
+                transcribe_text: None,
+            })?
         }
-        .map_err(|message| PipelineFailure {
-            message,
-            transcribe_text: None,
-        })?,
     };
     let transcribe_ms = transcribe_started.elapsed().as_millis() as u64;
 
@@ -581,13 +603,17 @@ async fn execute_pipeline(
             optimize_provider: None,
             transcribe_ms,
             optimize_ms: 0,
+            transcribe_attempts,
+            optimize_attempts: 0,
         });
     };
 
     observer(PipelineEvent::Optimizing);
     let retry_observer = observer.clone();
     let optimize_started = std::time::Instant::now();
+    let optimize_retries = Arc::new(AtomicU32::new(0));
     let optimized = {
+        let retry_count = optimize_retries.clone();
         let client = client.clone();
         let text = transcribe.text.clone();
         let config = config.clone();
@@ -616,7 +642,10 @@ async fn execute_pipeline(
                 },
                 config.advanced.max_retries,
                 config.advanced.optimize_timeout,
-                move |_| retry_observer(PipelineEvent::Retrying),
+                move |n| {
+                    retry_count.store(n, Ordering::SeqCst);
+                    retry_observer(PipelineEvent::Retrying)
+                },
             ) => result,
             _ = token.cancelled() => return Err(PipelineFailure {
                 message: "任务已取消".to_string(),
@@ -629,6 +658,7 @@ async fn execute_pipeline(
         transcribe_text: Some(transcribe.text.clone()),
     })?;
     let optimize_ms = optimize_started.elapsed().as_millis() as u64;
+    let optimize_attempts = optimize_retries.load(Ordering::SeqCst) + 1;
 
     Ok(PipelineOutput {
         transcribe_text: transcribe.text,
@@ -640,6 +670,8 @@ async fn execute_pipeline(
         optimize_provider: Some(optimized.provider).filter(|p| !p.is_empty()),
         transcribe_ms,
         optimize_ms,
+        transcribe_attempts,
+        optimize_attempts,
     })
 }
 

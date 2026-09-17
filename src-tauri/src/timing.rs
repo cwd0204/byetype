@@ -37,6 +37,14 @@ pub struct TimingRecord {
     /// 优化服务商显示名，未启用优化时为 None
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optimize_provider: Option<String>,
+    /// 转写阶段实际尝试次数，只在多于 1 次时记录。被超时掐掉的尝试在
+    /// usage.jsonl 里是隐形的（只记成功那次），这里补上：`transcribeMs` 很长
+    /// 而尝试次数是 2，一眼就知道是重试而不是服务慢。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcribe_attempts: Option<u32>,
+    /// 优化阶段实际尝试次数，只在多于 1 次时记录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimize_attempts: Option<u32>,
 }
 
 struct TimingState {
@@ -145,14 +153,29 @@ mod tests {
             transcribe_provider: "Google Gemini".to_string(),
             optimize_model: Some("deepseek-v3".to_string()),
             optimize_provider: Some("DeepSeek".to_string()),
+            transcribe_attempts: None,
+            optimize_attempts: Some(2),
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("\"transcribeMs\":3200"));
         assert!(json.contains("\"totalMs\":5420"));
+        assert!(json.contains("\"optimizeAttempts\":2"));
+        assert!(!json.contains("transcribeAttempts"));
         let back: TimingRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back.transcribe_model, "gemini-2.5-flash");
         assert_eq!(back.optimize_model.as_deref(), Some("deepseek-v3"));
         assert_eq!(back.optimize_provider.as_deref(), Some("DeepSeek"));
+        assert_eq!(back.optimize_attempts, Some(2));
+    }
+
+    /// 加字段之前写下的行必须照常读得出来，否则历史耗时页会整段丢失。
+    #[test]
+    fn timing_record_reads_rows_written_before_attempt_fields() {
+        let legacy = r#"{"ts":1700000000000,"transcribeMs":39556,"optimizeMs":57351,"otherMs":10,"totalMs":96917,"transcribeModel":"amazon-transcribe","transcribeProvider":"Amazon Transcribe","optimizeModel":"global.anthropic.claude-sonnet-5","optimizeProvider":"Amazon Bedrock"}"#;
+        let back: TimingRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.optimize_ms, 57351);
+        assert_eq!(back.transcribe_attempts, None);
+        assert_eq!(back.optimize_attempts, None);
     }
 
     #[test]
@@ -167,9 +190,12 @@ mod tests {
             transcribe_provider: "Google Gemini".to_string(),
             optimize_model: None,
             optimize_provider: None,
+            transcribe_attempts: None,
+            optimize_attempts: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(!json.contains("optimizeModel"));
+        assert!(!json.contains("Attempts"));
         let back: TimingRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back.optimize_model, None);
         assert_eq!(back.optimize_provider, None);

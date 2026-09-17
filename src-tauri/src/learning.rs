@@ -80,11 +80,18 @@ impl VoiceLearningManager {
             .unwrap_or_else(|error| error.into_inner()) = Some(text.to_string());
     }
 
+    /// 喂给提示词的学习规则。文档还只是模板自带的标题和说明、一条规则都没学到时
+    /// 返回空串，调用方就不会把一段没有信息量的骨架注进每次请求。
     pub fn rules_content(&self) -> String {
-        read_document(&self.rules_path).unwrap_or_else(|error| {
+        let content = read_document(&self.rules_path).unwrap_or_else(|error| {
             eprintln!("[learning] {error}");
             String::new()
-        })
+        });
+        if has_learned_rules(&content) {
+            content
+        } else {
+            String::new()
+        }
     }
 
     fn ensure_prompt_document(&self) -> Result<PathBuf, String> {
@@ -340,6 +347,13 @@ fn parse_generated_items(generated: &str) -> Result<Vec<LearningItem>, String> {
         items.push(item);
     }
     Ok(items)
+}
+
+/// 文档里有没有学到的规则。只把「和模板骨架一字不差」判成没有；用户手工改过
+/// 说明文字就照常当成有内容 —— 多注入一段只是多花 token，漏注入才伤识别质量。
+fn has_learned_rules(content: &str) -> bool {
+    let trimmed = content.trim();
+    !trimmed.is_empty() && trimmed != DOCUMENT_HEADER.trim()
 }
 
 fn append_learning_items(content: &str, additions: &[String]) -> String {
@@ -724,6 +738,16 @@ pub fn get_voice_learning_prompt_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_only_document_has_no_learned_rules() {
+        assert!(!has_learned_rules(""));
+        assert!(!has_learned_rules(DOCUMENT_HEADER));
+        assert!(!has_learned_rules(&format!("{DOCUMENT_HEADER}\n\n")));
+        assert!(has_learned_rules(&format!("{DOCUMENT_HEADER}- 李氏，不是李四\n")));
+        // 用户改过说明文字：拿不准就当成有内容
+        assert!(has_learned_rules("# 语音纠正学习\n\n我自己写的说明。\n"));
+    }
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -3,4 +3,7 @@
 pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// 推理块的字符数。Bedrock 不单独返回推理 token 数，只能在过滤
+    /// `reasoningContent` 块时数一下长度；0 表示没有推理块（或服务商不返回）。
+    pub reasoning_chars: u64,
 }

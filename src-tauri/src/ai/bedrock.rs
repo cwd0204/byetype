@@ -182,6 +182,18 @@ fn strip_thinking_tags(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// 推理块的字符总数。只数明文推理；被服务商加密的 `redactedContent` 数不了也不猜。
+/// Bedrock 的 outputTokens 把推理和正文混在一起，没有这个数就解释不了
+/// 「输出两千 token、正文一百字」是怎么来的。
+fn reasoning_chars(blocks: &[ContentBlock]) -> u64 {
+    blocks
+        .iter()
+        .filter_map(|block| block.as_reasoning_content().ok())
+        .filter_map(|reasoning| reasoning.as_reasoning_text().ok())
+        .map(|text| text.text().chars().count() as u64)
+        .sum()
+}
+
 /// 本次调用的 max_tokens：预算模式必须大于 budget_tokens，自适应模式给思考留余量。
 fn max_tokens_for(req: ThinkingRequest, thinking: &ThinkingConfig, base: i32) -> i32 {
     match req {
@@ -227,27 +239,29 @@ async fn send_once(
         .await
         .map_err(|e| aws::map_sdk_error(LABEL, e))?;
 
-    let text = response
+    let blocks = response
         .output()
         .and_then(|output| output.as_message().ok())
-        .map(|message| {
-            message
-                .content()
-                .iter()
-                .filter_map(|block| block.as_text().ok().map(|s| s.as_str()))
-                .collect::<Vec<_>>()
-                .join("")
-        })
+        .map(|message| message.content())
         .unwrap_or_default();
+    let text = blocks
+        .iter()
+        .filter_map(|block| block.as_text().ok().map(|s| s.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
     let text = strip_thinking_tags(&text);
 
-    let usage = response
-        .usage()
-        .map(|u| TokenUsage {
-            prompt_tokens: u.input_tokens().max(0) as u64,
-            completion_tokens: u.output_tokens().max(0) as u64,
-        })
-        .unwrap_or_default();
+    let usage = TokenUsage {
+        prompt_tokens: response
+            .usage()
+            .map(|u| u.input_tokens().max(0) as u64)
+            .unwrap_or_default(),
+        completion_tokens: response
+            .usage()
+            .map(|u| u.output_tokens().max(0) as u64)
+            .unwrap_or_default(),
+        reasoning_chars: reasoning_chars(blocks),
+    };
 
     Ok((text, usage))
 }
@@ -336,8 +350,8 @@ pub async fn optimize(
         // 正文为空基本只有一种成因：推理 token 把 max_tokens 占满了。
         // 回退原文是对的（总比丢字好），但别再无声无息 —— 上一轮就是这样查了很久。
         eprintln!(
-            "[Bedrock] {} returned no text (in={} out={}), falling back to raw transcript",
-            model, usage.prompt_tokens, usage.completion_tokens
+            "[Bedrock] {} returned no text (in={} out={} reasoning_chars={}), falling back to raw transcript",
+            model, usage.prompt_tokens, usage.completion_tokens, usage.reasoning_chars
         );
         return Ok((text.to_string(), usage));
     }
@@ -535,6 +549,28 @@ mod tests {
         // 配不上的标签原样留着，别把正常文本吃掉
         assert_eq!(strip_thinking_tags("正文 <thinking> 没闭合"), "正文 <thinking> 没闭合");
         assert_eq!(strip_thinking_tags("普通中文，没有标签"), "普通中文，没有标签");
+    }
+
+    #[test]
+    fn counts_only_plain_reasoning_text() {
+        use aws_sdk_bedrockruntime::types::{ReasoningContentBlock, ReasoningTextBlock};
+
+        let reasoning = |text: &str| {
+            ContentBlock::ReasoningContent(ReasoningContentBlock::ReasoningText(
+                ReasoningTextBlock::builder().text(text).build().unwrap(),
+            ))
+        };
+        let blocks = vec![
+            reasoning("先想一想"),
+            ContentBlock::Text("正文".to_string()),
+            reasoning("再想想"),
+            ContentBlock::ReasoningContent(ReasoningContentBlock::RedactedContent(Blob::new(
+                vec![0u8; 64],
+            ))),
+        ];
+        assert_eq!(reasoning_chars(&blocks), 7);
+        assert_eq!(reasoning_chars(&[ContentBlock::Text("只有正文".to_string())]), 0);
+        assert_eq!(reasoning_chars(&[]), 0);
     }
 
     #[test]

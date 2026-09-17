@@ -26,6 +26,11 @@ pub struct UsageRecord {
     pub provider: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// 推理（thinking）正文的字符数，只在模型确实返回了推理块时记录。
+    /// Bedrock 的用量回包里没有单独的推理 token 数，`outputTokens` 把推理和
+    /// 可见正文混在一起；这个字段用来解释「输出 token 两千多、正文只有一百字」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_chars: Option<u64>,
 }
 
 struct UsageState {
@@ -67,7 +72,14 @@ pub fn init(data_dir: &std::path::Path, app: AppHandle) {
 }
 
 /// 记录一次成功的模型调用。写入失败只打日志，不影响主流程。
-pub fn record(scene: &str, model: &str, provider: &str, input_tokens: u64, output_tokens: u64) {
+pub fn record(
+    scene: &str,
+    model: &str,
+    provider: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    reasoning_chars: Option<u64>,
+) {
     let entry = UsageRecord {
         ts: now_millis(),
         scene: scene.to_string(),
@@ -75,6 +87,7 @@ pub fn record(scene: &str, model: &str, provider: &str, input_tokens: u64, outpu
         provider: provider.to_string(),
         input_tokens,
         output_tokens,
+        reasoning_chars,
     };
     let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
 
@@ -139,12 +152,34 @@ mod tests {
             provider: "Google Gemini".to_string(),
             input_tokens: 120,
             output_tokens: 45,
+            reasoning_chars: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("\"inputTokens\":120"));
         assert!(json.contains("\"outputTokens\":45"));
+        assert!(!json.contains("reasoningChars"));
         let back: UsageRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back.scene, "transcribe");
         assert_eq!(back.ts, 1700000000000);
+        assert_eq!(back.reasoning_chars, None);
+    }
+
+    #[test]
+    fn usage_record_keeps_reasoning_chars_when_present() {
+        let record = UsageRecord {
+            ts: 1,
+            scene: "optimize".to_string(),
+            model: "global.anthropic.claude-sonnet-5".to_string(),
+            provider: "Amazon Bedrock".to_string(),
+            input_tokens: 3200,
+            output_tokens: 2269,
+            reasoning_chars: Some(5800),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"reasoningChars\":5800"));
+        // 加字段之前写下的行照常读
+        let legacy = r#"{"ts":1,"scene":"optimize","model":"m","provider":"p","inputTokens":1,"outputTokens":2}"#;
+        let back: UsageRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.reasoning_chars, None);
     }
 }

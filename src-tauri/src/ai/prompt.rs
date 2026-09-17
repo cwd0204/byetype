@@ -18,6 +18,34 @@ pub fn wrap_document(name: &str, content: &str) -> String {
     format!("<document name=\"{}\">\n{}\n</document>", name, content)
 }
 
+/// 参考文档（转录规则 / 专有词汇表）的包装：文档只剩模板骨架时不注入。
+///
+/// 内置的 vocabulary.md 是「一级标题 + 一句说明 + 四个空的二级章节」，很多用户
+/// 从没往里填过词，但它照样每次都被注进优化请求，白花一百多个 token。
+fn wrap_reference_document(name: &str, content: &str) -> String {
+    if is_skeleton_only(content) {
+        return String::new();
+    }
+    wrap_document(name, content)
+}
+
+/// 「有章节标题，但所有章节都是空的」视为骨架。判定刻意保守：文档里没有二级
+/// 标题就不猜（用户自己写的自由格式一律照常注入），章节下有任何一行正文都算有内容。
+fn is_skeleton_only(content: &str) -> bool {
+    let mut seen_section = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("##") {
+            seen_section = true;
+            continue;
+        }
+        if seen_section && !line.is_empty() && !line.starts_with('#') {
+            return false;
+        }
+    }
+    seen_section
+}
+
 pub fn resolve_prompt_path(custom: &str, builtin: &str) -> String {
     if !custom.is_empty() {
         custom.to_string()
@@ -75,8 +103,8 @@ pub fn build_transcribe_prompt(
 
     let parts: Vec<String> = [
         wrap_document("agent", &agent_content),
-        wrap_document("vocabulary", &vocabulary_content),
-        wrap_document("rules", &rules_content),
+        wrap_reference_document("vocabulary", &vocabulary_content),
+        wrap_reference_document("rules", &rules_content),
         wrap_document("voice-learning", learning_rules),
     ]
     .into_iter()
@@ -113,8 +141,8 @@ pub fn build_optimize_prompt(
     let vocabulary_content = load_prompt(&vocabulary_path);
 
     let reference_parts: Vec<String> = [
-        wrap_document("rules", &rules_content),
-        wrap_document("vocabulary", &vocabulary_content),
+        wrap_reference_document("rules", &rules_content),
+        wrap_reference_document("vocabulary", &vocabulary_content),
         wrap_document("voice-learning", learning_rules),
     ]
     .into_iter()
@@ -322,5 +350,41 @@ mod tests {
         assert!(prompt.contains("<document name=\"voice-learning\">\n学习结果"));
 
         std::fs::remove_dir_all(prompts_dir).unwrap();
+    }
+
+    /// 内置词汇表模板只有标题、一句说明和四个空章节，没填过词就不该注进请求。
+    #[test]
+    fn skeleton_vocabulary_is_not_injected() {
+        let prompts_dir = test_prompts_dir("optimize-skeleton");
+        std::fs::write(prompts_dir.join("rules.md"), "转录规则").unwrap();
+        std::fs::write(
+            prompts_dir.join("vocabulary.md"),
+            "# 专有词汇表\n\n遇到发音相近的词必须校正。\n\n## 👤 人名\n\n\n\n## 💻 技术词汇\n\n",
+        )
+        .unwrap();
+        std::fs::write(prompts_dir.join("text-optimize.md"), "文本优化提示词").unwrap();
+
+        let mut config = AppConfig::default();
+        config.voice_templates.reuse_transcribe_references = true;
+
+        let prompt = build_optimize_prompt(&config, &prompts_dir, "voice-optimize", "");
+
+        assert!(prompt.contains("<document name=\"rules\">\n转录规则"));
+        assert!(!prompt.contains("<document name=\"vocabulary\">"), "{prompt}");
+        assert!(!prompt.contains("<document name=\"voice-learning\">"));
+
+        std::fs::remove_dir_all(prompts_dir).unwrap();
+    }
+
+    #[test]
+    fn skeleton_detection_is_conservative() {
+        assert!(is_skeleton_only("# 词汇表\n\n说明。\n\n## 人名\n\n## 术语\n"));
+        assert!(is_skeleton_only("## 人名\n\n### 同事\n"));
+        assert!(!is_skeleton_only("# 词汇表\n\n## 人名\n\n蔡伟东\n"));
+        assert!(!is_skeleton_only("# 词汇表\n\n## 人名\n\n- ByeType\n"));
+        // 没有章节标题就不猜，照常注入
+        assert!(!is_skeleton_only("Bedrock, Transcribe"));
+        assert!(!is_skeleton_only("# 只有一级标题\n\n一句话\n"));
+        assert!(!is_skeleton_only(""));
     }
 }

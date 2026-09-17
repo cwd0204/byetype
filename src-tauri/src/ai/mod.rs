@@ -30,6 +30,8 @@ fn record_usage(scene: &str, resolved: &models::ResolvedModel, usage: TokenUsage
         &resolved.provider_label,
         usage.prompt_tokens,
         usage.completion_tokens,
+        // 没有推理块就不写这个字段，老记录与新记录在用量页上长得一样。
+        Some(usage.reasoning_chars).filter(|&n| n > 0),
     );
 }
 

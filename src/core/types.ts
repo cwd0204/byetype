@@ -264,6 +264,8 @@ export interface UsageRecord {
   provider: string
   inputTokens: number
   outputTokens: number
+  /** 推理块字符数（Bedrock 不单独返回推理 token 数），没有推理块时不写 */
+  reasoningChars?: number
 }
 
 export interface TimingRecord {
@@ -281,6 +283,10 @@ export interface TimingRecord {
   transcribeProvider: string
   optimizeModel?: string | null
   optimizeProvider?: string | null
+  /** 转写阶段实际尝试次数，只在多于 1 次时写入 */
+  transcribeAttempts?: number
+  /** 优化阶段实际尝试次数，只在多于 1 次时写入 */
+  optimizeAttempts?: number
 }
 
 export interface UpdateInfo {
