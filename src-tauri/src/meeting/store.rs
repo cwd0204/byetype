@@ -407,11 +407,17 @@ mod tests {
                 "我：大家好",
             )
             .unwrap();
-        assert!(path
-            .file_name()
+        // 文件名里的时间按本机时区格式化，CI runner 是 UTC，本机是东八区，
+        // 期望值要用同一套转换算出来，不能写死「1400」。
+        let expected_stamp = DateTime::parse_from_rfc3339("2026-09-17T14:00:00+08:00")
             .unwrap()
-            .to_string_lossy()
-            .ends_with("2026-09-17 1400 项目周会.md"));
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H%M")
+            .to_string();
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            format!("{} 项目周会.md", expected_stamp)
+        );
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("# 项目周会"));
         assert!(content.contains("## 逐字转写"));
