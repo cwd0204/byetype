@@ -29,6 +29,8 @@ cargo fmt && cargo clippy    # 提 PR 前格式化 + lint
 
 ## 📦 发版规范
 
+- **打 tag 前先看 `CI` 工作流（`.github/workflows/ci.yml`）在 windows-latest 上是绿的**。本机 macOS 无法交叉编译 Windows target（ring / aws-lc-sys / zstd 等依赖的 C 代码缺 Windows 头文件），带 `cfg(windows)` 的代码只有 CI 才会第一次遇到编译器
+- 发布走 fork 自己的密钥：更新器公钥在 `tauri.conf.json` 的 `plugins.updater.pubkey`，endpoint 指向 `cwd0204/byetype`；私钥、密码与 macOS 自签名证书（CN `ByeType Developer`）在仓库外的 `~/.byetype-release/`，对应 fork 的四个 Actions secret（`TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]`、`APPLE_CERTIFICATE[_PASSWORD]`）。不要把上游的其他 tag 推到 fork，每个 `v*` tag 都会触发一次发布构建
 - 版本号在三处同步：`package.json`、`src-tauri/Cargo.toml`（连带 Cargo.lock）、`src-tauri/tauri.conf.json`。发版提交格式 `chore: 发布 vX.Y.Z`，随后打 `vX.Y.Z` tag 推送触发 `.github/workflows/release.yml`（macOS arm64 / intel + Windows，产出 updater 用的 `latest.json`）
 - 工作流从提交主题自动生成说明，会过滤 chore/docs/refactor/style/test/ci 前缀，所以 feat / fix 的提交主题要写成用户能看懂的中文
 - GitHub Release 的版本说明必须使用中文。合并的 PR 标题可能是英文，发版构建完成后必须检查 Release 说明，把英文条目翻译成中文再结束发版（命令：`gh release edit v<版本> --notes "<中文说明>"`）
