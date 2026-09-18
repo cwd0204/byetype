@@ -6,9 +6,9 @@
   "author": "devonmochi",
   "repository": {
     "type": "git",
-    "url": "https://github.com/devonmochi/byetype.git"
+    "url": "https://github.com/cwd0204/byetype.git"
   },
-  "homepage": "https://github.com/devonmochi/byetype",
+  "homepage": "https://github.com/cwd0204/byetype",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -3,7 +3,7 @@
 **告别打字，用说的。**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-brightgreen?style=flat-square)](https://github.com/devonmochi/byetype/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-brightgreen?style=flat-square)](https://github.com/cwd0204/byetype/releases)
 
 ByeType 是一个 Markdown 驱动的 AI 语音输入工具。按 F4 说话，文字经转写、润色、格式化后自动落到光标位置。识别规则、专有词汇和输出风格都写在可编辑的 Markdown 提示词里，行业术语和个人说法一次调对。
 
@@ -12,6 +12,18 @@ ByeType 是一个 Markdown 驱动的 AI 语音输入工具。按 F4 说话，文
 免费开源，使用你自己的 AWS 账号：语音交给 Amazon Transcribe 识别，文本与截图交给 Amazon Bedrock 上的 Claude 处理，ByeType 本身不收费、不经手数据。支持 macOS、Windows 桌面端。
 
 ![录音 → 转写 → 优化 → 自动粘贴](docs/images/demo.gif)
+
+## 📥 安装
+
+从 [Releases](https://github.com/cwd0204/byetype/releases/latest) 下载对应平台的安装包：
+
+| 平台 | 文件 |
+|---|---|
+| macOS（Apple Silicon） | `ByeType_<版本>_macos-arm64.dmg` |
+| macOS（Intel） | `ByeType_<版本>_macos-intel.dmg` |
+| Windows 10 / 11（x64） | `ByeType_<版本>_x64-setup.exe` |
+
+安装包没有经过 Apple 公证或 Windows 代码签名，首次打开会有系统提示，处理办法见「常见问题」。应用内置自动更新，之后的版本会自己提示升级。
 
 ## 🏆 为什么选择 ByeType
 
@@ -28,7 +40,7 @@ ByeType 是一个 Markdown 驱动的 AI 语音输入工具。按 F4 说话，文
 
 ## 🤖 支持的模型
 
-只接 AWS，不需要 API Key，凭证来自本机 `~/.aws/config` 里的 profile（ADA `credential_process`、静态 key、SSO 均可）：
+只接 AWS，不需要 API Key，凭证来自本机 `~/.aws/config`（Windows 为 `%USERPROFILE%\.aws\config`）里的 profile（ADA `credential_process`、静态 key、SSO 均可）：
 
 | 用途 | 服务 | 预置模型 |
 |---|---|---|
@@ -181,7 +193,7 @@ some-audio-command | curl -fsS -X POST \
 
 ### 🎙️ 会议记录（Zoom）
 
-在「设置 → 会议记录」启用后，检测到 Zoom 开会会自动开始录制麦克风和系统音频（macOS 14.2+，需要「仅系统音频录制」权限），按段送 Amazon Transcribe 转写并区分说话人；会议结束后由 Claude 生成结构化纪要（概述、主题要点、后续行动、已定事项），连同逐字转写导出成 Markdown 到你指定的笔记目录（可指向 Obsidian vault）。托盘菜单也可以手动开始 / 停止录制，会议窗口能实时查看转写、编辑纪要。
+在「设置 → 会议记录」启用后，检测到 Zoom 开会会自动开始录制麦克风和系统音频（系统音频仅 macOS 14.2+ 支持，需要「仅系统音频录制」权限；Windows 目前只录麦克风），按段送 Amazon Transcribe 转写并区分说话人；会议结束后由 Claude 生成结构化纪要（概述、主题要点、后续行动、已定事项），连同逐字转写导出成 Markdown 到你指定的笔记目录（可指向 Obsidian vault）。托盘菜单也可以手动开始 / 停止录制，会议窗口能实时查看转写、编辑纪要。
 
 ## ❓ 常见问题
 
@@ -201,6 +213,12 @@ some-audio-command | curl -fsS -X POST \
 <summary><b>macOS 提示「无法验证开发者」</b></summary>
 
 前往「系统设置 → 隐私与安全性」，找到 ByeType 的提示信息，点击「仍要打开」。
+</details>
+
+<details>
+<summary><b>Windows 提示「Windows 已保护你的电脑」</b></summary>
+
+安装包没有做代码签名，SmartScreen 会拦一次。点「更多信息」→「仍要运行」即可。
 </details>
 
 <details>
@@ -224,7 +242,7 @@ some-audio-command | curl -fsS -X POST \
 
 - 关闭文本优化的思考（设置 → 转写设置 → 启用思考 → 关闭）
 - 文本优化换成 Claude Haiku 4.5
-- Transcribe 的耗时大致与音频时长同量级，长录音请把「通用设置」里的转写超时调大
+- 听写是边说边转写的，松手后通常 1 秒内出转写结果；「用量统计」里 transcribeMs 若接近音频时长，说明流式路径失败后回退到了整段上传，先检查 Transcribe 的凭证与网络
 </details>
 
 ## 🏗️ 技术栈
