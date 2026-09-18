@@ -1,0 +1,57 @@
+name: CI
+
+# 编译门禁：Windows 那一路没有人本机能跑，改动只有在这里才第一次遇到 Windows 编译器。
+# 发版前先看这里绿了再打 tag。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      # tsc 类型检查 + 产出 dist/，tauri::generate_context! 编译期要求 dist/ 存在
+      - name: Build frontend
+        run: npm run build
+
+      - name: Rust unit tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - name: Clippy
+        if: matrix.platform == 'macos-latest'
+        working-directory: src-tauri
+        run: cargo clippy --lib
