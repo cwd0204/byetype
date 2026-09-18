@@ -109,9 +109,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}/{}", home.trim_end_matches('/'), rest);
+    let rest = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("~\\"));
+    if let Some(rest) = rest {
+        // Windows 上一般没有 HOME，只有 USERPROFILE。
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
+        if let Ok(home) = home {
+            return Path::new(home.trim_end_matches(['/', '\\']))
+                .join(rest)
+                .to_string_lossy()
+                .into_owned();
         }
     }
     path.to_string()
@@ -246,7 +254,10 @@ impl MeetingManager {
         let capture_config = CaptureConfig {
             mic_device: config.general.microphone.clone(),
             capture_mic: config.meeting.capture_microphone,
-            capture_system: config.meeting.capture_system_audio,
+            // 平台不支持系统音频（Windows、旧 macOS）就直接不开，别每场会议都挂一条
+            // 「系统音频不可用」的警告；设置页本来就把开关置灰并显示了原因。
+            capture_system: config.meeting.capture_system_audio
+                && super::capture::system_audio_support().is_ok(),
             chunk_seconds: config.meeting.chunk_seconds,
         };
         let sink = CaptureSink {

@@ -127,7 +127,7 @@ pub fn new_system_backend() -> Result<Box<dyn CaptureBackend>, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err("当前平台暂不支持录制系统音频，只能录制麦克风".to_string())
+        Err(crate::i18n::tr("err.systemAudioUnsupported").to_string())
     }
 }
 
@@ -139,7 +139,7 @@ pub fn system_audio_support() -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err("当前平台暂不支持录制系统音频".to_string())
+        Err(crate::i18n::tr("err.systemAudioUnsupported").to_string())
     }
 }
 

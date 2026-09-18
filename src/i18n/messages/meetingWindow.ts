@@ -27,6 +27,7 @@ export const meetingWindow: MessageBundle = {
     'meetingWindow.regenerateSummary': '重新生成纪要',
     'meetingWindow.generateSummary': '生成纪要',
     'meetingWindow.revealInFinder': '在 Finder 中显示',
+    'meetingWindow.revealInExplorer': '在资源管理器中显示',
     'meetingWindow.confirmDelete': '删除这场会议的全部记录？',
 
     'meetingWindow.liveRecording': '录制中 {elapsed}',
@@ -86,6 +87,7 @@ export const meetingWindow: MessageBundle = {
     'meetingWindow.regenerateSummary': 'Regenerate summary',
     'meetingWindow.generateSummary': 'Generate summary',
     'meetingWindow.revealInFinder': 'Show in Finder',
+    'meetingWindow.revealInExplorer': 'Show in Explorer',
     'meetingWindow.confirmDelete': 'Delete all records of this meeting?',
 
     'meetingWindow.liveRecording': 'Recording {elapsed}',

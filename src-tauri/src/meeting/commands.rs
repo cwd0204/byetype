@@ -140,8 +140,11 @@ pub fn meeting_reveal(manager: State<'_, MeetingManager>, id: String) -> Result<
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // 路径含空格时 std 会给整个参数加引号，Explorer 对此处理不一致；
+        // 用 raw_arg 自己控制引号只包住路径。
         std::process::Command::new("explorer")
-            .arg(format!("/select,{}", target.display()))
+            .raw_arg(format!("/select,\"{}\"", target.display()))
             .spawn()
             .map_err(|e| {
                 tr_fmt("err.openExplorerFailed", &[("error", e.to_string().as_str())])

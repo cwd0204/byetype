@@ -24,7 +24,8 @@ const DEFAULT_LABEL_KEYS = {
 const IS_MACOS = navigator.platform.toUpperCase().includes('MAC')
 
 function formatShortcutDisplay(combo: string): string {
-  if (!IS_MACOS) return combo
+  // 存储值用热键解析器认的 Super，显示成 Windows 用户认的 Win
+  if (!IS_MACOS) return combo.replace(/Super/g, 'Win')
   return combo
     .replace(/Command/g, '\u2318')
     .replace(/Shift/g, '\u21E7')
@@ -141,7 +142,8 @@ export function GeneralTab({ config, onSave }: Props) {
       if (e.ctrlKey) parts.push('Ctrl')
       if (e.altKey) parts.push('Alt')
       if (e.shiftKey) parts.push('Shift')
-      if (e.metaKey) parts.push(IS_MACOS ? 'Command' : 'Win')
+      // global-hotkey 只认 Super / Command，不认 Win
+      if (e.metaKey) parts.push(IS_MACOS ? 'Command' : 'Super')
       parts.push(key)
       const combo = parts.join('+')
 

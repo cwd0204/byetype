@@ -27,8 +27,12 @@ pub async fn zoom_meeting_active() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
+        // 应用是 GUI 子系统进程，子进程不带 CREATE_NO_WINDOW 的话，
+        // 每次轮询都会闪出一个黑色控制台窗。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         tokio::process::Command::new("tasklist")
             .args(["/FI", "IMAGENAME eq CptHost.exe", "/NH"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .await
             .map(|output| String::from_utf8_lossy(&output.stdout).contains("CptHost.exe"))

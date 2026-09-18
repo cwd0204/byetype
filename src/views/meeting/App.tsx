@@ -18,6 +18,8 @@ import {
 import { t, useLang } from '../../i18n'
 import { bootstrapLanguage } from '../../i18n/tauri'
 
+const IS_MACOS = navigator.platform.toUpperCase().includes('MAC')
+
 type Tab = 'summary' | 'transcript'
 
 /** 底部提示：前端文案存 key（切语言后能重译），后端返回的原文直接存字符串 */
@@ -276,7 +278,7 @@ export default function App() {
                       {(meta.status === 'summary_failed' || meta.status === 'interrupted' || meta.status === 'done') && (
                         <button className="btn" disabled={busy !== null} onClick={() => run('regen', () => regenerateMeetingSummary(meta.id))}>{meta.status === 'done' ? t('meetingWindow.regenerateSummary') : t('meetingWindow.generateSummary')}</button>
                       )}
-                      <button className="btn" onClick={() => revealMeeting(meta.id).catch(() => {})}>{t('meetingWindow.revealInFinder')}</button>
+                      <button className="btn" onClick={() => revealMeeting(meta.id).catch(() => {})}>{t(IS_MACOS ? 'meetingWindow.revealInFinder' : 'meetingWindow.revealInExplorer')}</button>
                       <button className="btn danger" disabled={busy !== null} onClick={() => { if (confirm(t('meetingWindow.confirmDelete'))) run('delete', async () => { await deleteMeeting(meta.id); setSelectedId(null); await refreshList() }) }}>{t('common.delete')}</button>
                     </>
                   )}
