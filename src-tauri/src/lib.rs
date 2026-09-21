@@ -6,6 +6,7 @@ mod clipboard;
 mod config;
 mod commands;
 mod i18n;
+mod modifier_hotkey;
 mod preview;
 mod shortcut;
 mod tray;

@@ -7,6 +7,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use crate::ai::transcribe_live::LiveTranscribe;
 use crate::audio::recorder::{AudioRecorder, LiveAudio};
 use crate::config::ConfigManager;
+use crate::modifier_hotkey::{self, Handler, HotkeyEvent, ModifierKey};
 
 /// PTT 模式下，按住时间小于此阈值视为误触，丢弃录音。
 const PTT_MIN_DURATION_MS: u64 = 300;
@@ -26,7 +27,7 @@ pub fn register(
     recorder: Arc<AudioRecorder>,
 ) -> Result<(), String> {
     let cfg = app.state::<ConfigManager>().get();
-    // Image shortcut 1 falls back to "F6" when empty (see register_image_shortcut
+    // Image shortcut 1 falls back to "F6" when empty (see the bind() call for ek1
     // below). Apply the same fallback here so conflict detection sees the actual
     // key that will be registered — otherwise an empty extract_shortcut would
     // bypass the uniqueness check and silently collide with another "F6" shortcut.
@@ -49,34 +50,84 @@ pub fn register(
 
     app.global_shortcut().unregister_all()
         .map_err(|e| format!("Failed to unregister shortcuts: {}", e))?;
+    // 修饰键通道同样先清空；注册失败回滚时 register 会被再调一次，把旧绑定补回来
+    modifier_hotkey::set_bindings(Vec::new());
+    let mut modifier_bindings: Vec<(ModifierKey, Handler)> = Vec::new();
 
     // Voice shortcut 1
     if !cfg.general.shortcut.is_empty() {
-        register_voice_shortcut(app, &cfg.general.shortcut, cfg.general.shortcut_template.clone(), recorder.clone())?;
+        let key = &cfg.general.shortcut;
+        let handler = voice_handler(app, cfg.general.shortcut_template.clone(), recorder.clone(), fires_on_release(key));
+        bind(app, key, "voice", handler, &mut modifier_bindings)?;
     }
     // Voice shortcut 2
     if !cfg.general.shortcut2.is_empty() {
-        register_voice_shortcut(app, &cfg.general.shortcut2, cfg.general.shortcut2_template.clone(), recorder.clone())?;
+        let key = &cfg.general.shortcut2;
+        let handler = voice_handler(app, cfg.general.shortcut2_template.clone(), recorder.clone(), fires_on_release(key));
+        bind(app, key, "voice", handler, &mut modifier_bindings)?;
     }
     // Image shortcut 1 (ek1 with fallback already computed above for conflict detection)
-    register_image_shortcut(app, &ek1, cfg.general.extract_shortcut_template.clone())?;
+    {
+        let handler = image_handler(app, cfg.general.extract_shortcut_template.clone(), fires_on_release(&ek1));
+        bind(app, &ek1, "image", handler, &mut modifier_bindings)?;
+    }
     // Image shortcut 2
     if !cfg.general.extract_shortcut2.is_empty() {
-        register_image_shortcut(app, &cfg.general.extract_shortcut2, cfg.general.extract_shortcut2_template.clone())?;
+        let key = &cfg.general.extract_shortcut2;
+        let handler = image_handler(app, cfg.general.extract_shortcut2_template.clone(), fires_on_release(key));
+        bind(app, key, "image", handler, &mut modifier_bindings)?;
     }
 
+    modifier_hotkey::set_bindings(modifier_bindings);
     Ok(())
 }
 
-/// Register a single voice (recording) shortcut bound to the given template_id.
+/// 单独修饰键要等松开才触发（toggle / 截图），这样按住它输入组合键时才有机会取消。
+/// 普通键与组合键沿用按下即触发。
+fn fires_on_release(key: &str) -> bool {
+    ModifierKey::parse(key).is_some()
+}
+
+/// 把 handler 挂到对应通道：单独修饰键进 `modifier_hotkey` 的轮询表，其余交给 global-shortcut。
+/// `kind` 只用于错误文案（"voice" / "image"），格式保持 `Failed to register <kind> shortcut '<key>': ...`。
+fn bind(
+    app: &AppHandle,
+    key: &str,
+    kind: &str,
+    handler: Handler,
+    modifier_bindings: &mut Vec<(ModifierKey, Handler)>,
+) -> Result<(), String> {
+    if let Some(modifier) = ModifierKey::parse(key) {
+        // 轮询线程不是主线程；把回调派回主线程，与 global-shortcut 的回调保持同一执行环境
+        let app = app.clone();
+        let on_main: Handler = Arc::new(move |event| {
+            let handler = handler.clone();
+            let _ = app.run_on_main_thread(move || handler(event));
+        });
+        modifier_bindings.push((modifier, on_main));
+        return Ok(());
+    }
+
+    app.global_shortcut()
+        .on_shortcut(key, move |_app, _shortcut, event| {
+            let event = match event.state {
+                ShortcutState::Pressed => HotkeyEvent::Pressed,
+                ShortcutState::Released => HotkeyEvent::Released,
+            };
+            handler(event);
+        })
+        .map_err(|e| format!("Failed to register {} shortcut '{}': {}", kind, key, e))
+}
+
+/// Build the handler for a voice (recording) shortcut bound to the given template_id.
 /// Supports both Toggle mode (default) and Push-to-Talk mode based on config.general.ptt_mode
 /// at event time — switching mode does NOT require re-registering the shortcut.
-fn register_voice_shortcut(
+fn voice_handler(
     app: &AppHandle,
-    shortcut_key: &str,
     template_id: String,
     recorder: Arc<AudioRecorder>,
-) -> Result<(), String> {
+    fires_on_release: bool,
+) -> Handler {
     let app_handle = app.clone();
     let tmpl = template_id;
     // Track the current recording's task_id between start and stop
@@ -84,49 +135,53 @@ fn register_voice_shortcut(
     let current_live: CurrentLive = Arc::new(Mutex::new(None));
     let recording_gen: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
 
-    app.global_shortcut()
-        .on_shortcut(shortcut_key, move |_app, _shortcut, event| {
-            let ptt = app_handle.state::<ConfigManager>().get().general.ptt_mode;
+    Arc::new(move |event: HotkeyEvent| {
+        let ptt = app_handle.state::<ConfigManager>().get().general.ptt_mode;
 
-            if ptt {
-                handle_ptt_event(
-                    &app_handle,
-                    event.state,
-                    &recorder,
-                    &current_task_id,
-                    &current_live,
-                    &recording_gen,
-                    &tmpl,
-                );
-            } else {
-                handle_toggle_event(
-                    &app_handle,
-                    event.state,
-                    &recorder,
-                    &current_task_id,
-                    &current_live,
-                    &recording_gen,
-                    &tmpl,
-                );
-            }
-        })
-        .map_err(|e| format!("Failed to register voice shortcut '{}': {}", shortcut_key, e))?;
-
-    Ok(())
+        if ptt {
+            handle_ptt_event(
+                &app_handle,
+                event,
+                &recorder,
+                &current_task_id,
+                &current_live,
+                &recording_gen,
+                &tmpl,
+            );
+        } else {
+            handle_toggle_event(
+                &app_handle,
+                event,
+                fires_on_release,
+                &recorder,
+                &current_task_id,
+                &current_live,
+                &recording_gen,
+                &tmpl,
+            );
+        }
+    })
 }
 
 /// Toggle mode: press once to start, press again to stop + transcribe.
-/// Original behavior — kept identical to pre-PTT code path.
+/// 普通键在 Pressed 触发（原有行为）；单独修饰键在干净的 Released 触发，Cancelled 不动作。
+#[allow(clippy::too_many_arguments)]
 fn handle_toggle_event(
     app_handle: &AppHandle,
-    state: ShortcutState,
+    event: HotkeyEvent,
+    fires_on_release: bool,
     recorder: &Arc<AudioRecorder>,
     current_task_id: &Arc<Mutex<Option<u32>>>,
     current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
 ) {
-    if state != ShortcutState::Pressed {
+    let trigger = if fires_on_release {
+        HotkeyEvent::Released
+    } else {
+        HotkeyEvent::Pressed
+    };
+    if event != trigger {
         return;
     }
 
@@ -166,24 +221,34 @@ fn handle_toggle_event(
 }
 
 /// PTT mode: press to start, release to stop + transcribe (or cancel if too short).
+/// `Cancelled`（单独修饰键按住期间夹了别的键）与「按得太短」走同一条丢弃路径。
 fn handle_ptt_event(
     app_handle: &AppHandle,
-    state: ShortcutState,
+    event: HotkeyEvent,
     recorder: &Arc<AudioRecorder>,
     current_task_id: &Arc<Mutex<Option<u32>>>,
     current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
 ) {
-    match state {
-        ShortcutState::Pressed => {
+    match event {
+        HotkeyEvent::Pressed => {
             // Debounce: some platforms repeat Pressed events while held.
             if recorder.is_recording() {
                 return;
             }
             start_voice_recording(app_handle, recorder, current_task_id, current_live, recording_gen, tmpl, true);
         }
-        ShortcutState::Released => {
+        HotkeyEvent::Cancelled => {
+            // CAS: race against auto-timeout timer.
+            let gen = recording_gen.load(Ordering::SeqCst);
+            if recording_gen.compare_exchange(gen, gen + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                return; // Auto-timeout already stopped it.
+            }
+            let task_id = current_task_id.lock().unwrap().take();
+            discard_recording(app_handle, recorder, current_live, task_id);
+        }
+        HotkeyEvent::Released => {
             // CAS: race against auto-timeout timer.
             let gen = recording_gen.load(Ordering::SeqCst);
             if recording_gen.compare_exchange(gen, gen + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
@@ -195,14 +260,7 @@ fn handle_ptt_event(
 
             if elapsed < Duration::from_millis(PTT_MIN_DURATION_MS) {
                 // Too short — discard recording, no transcription.
-                let _ = recorder.cancel();
-                if let Some(live) = current_live.lock().unwrap().take() {
-                    live.abort();
-                }
-                update_tray_icon(app_handle, false);
-                if let Some(tid) = task_id {
-                    crate::task::cancel_recording(app_handle, tid);
-                }
+                discard_recording(app_handle, recorder, current_live, task_id);
             } else {
                 // 顺序同 toggle：先停流，再取会话。
                 let stopped = recorder.stop();
@@ -227,6 +285,24 @@ fn handle_ptt_event(
                 }
             }
         }
+    }
+}
+
+/// 丢弃一次不该转写的录音（PTT 按得太短，或单独修饰键按住期间夹了别的键）：
+/// 取消采集与流式会话、还原托盘图标、释放任务槽位。
+fn discard_recording(
+    app_handle: &AppHandle,
+    recorder: &Arc<AudioRecorder>,
+    current_live: &CurrentLive,
+    task_id: Option<u32>,
+) {
+    let _ = recorder.cancel();
+    if let Some(live) = current_live.lock().unwrap().take() {
+        live.abort();
+    }
+    update_tray_icon(app_handle, false);
+    if let Some(tid) = task_id {
+        crate::task::cancel_recording(app_handle, tid);
     }
 }
 
@@ -415,21 +491,22 @@ fn open_live_stream(
     }
 }
 
-/// Register a single image (screenshot + OCR extraction) shortcut bound to the given template_id.
-fn register_image_shortcut(
-    app: &AppHandle,
-    shortcut_key: &str,
-    template_id: String,
-) -> Result<(), String> {
+/// Build the handler for an image (screenshot + OCR extraction) shortcut bound to the given template_id.
+/// 普通键在 Pressed 触发；单独修饰键在干净的 Released 触发。
+fn image_handler(app: &AppHandle, template_id: String, fires_on_release: bool) -> Handler {
     let extract_app = app.clone();
     let tmpl = template_id;
-    app.global_shortcut()
-        .on_shortcut(shortcut_key, move |_app, _shortcut, event| {
-            if event.state != ShortcutState::Pressed { return; }
-            crate::task::start_extraction(&extract_app, tmpl.clone());
-        })
-        .map_err(|e| format!("Failed to register image shortcut '{}': {}", shortcut_key, e))?;
-    Ok(())
+    let trigger = if fires_on_release {
+        HotkeyEvent::Released
+    } else {
+        HotkeyEvent::Pressed
+    };
+    Arc::new(move |event: HotkeyEvent| {
+        if event != trigger {
+            return;
+        }
+        crate::task::start_extraction(&extract_app, tmpl.clone());
+    })
 }
 
 /// 听写录音状态交给 tray 统一合成图标（会议录制也会点亮同一个图标）。

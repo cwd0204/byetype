@@ -59,6 +59,7 @@ cargo fmt && cargo clippy    # 提 PR 前格式化 + lint
 
 ```
 shortcut.rs  全局快捷键（2 个语音 + 2 个图像，各绑一个 template_id；toggle / PTT 在按键事件时读配置决定）
+             单独修饰键（AltRight 等 8 个 KeyboardEvent.code 值）global-hotkey 注册不了，走 modifier_hotkey.rs 轮询键状态，toggle / 截图在松开时触发，按住期间夹了别的键则取消
   → audio/recorder.rs  cpal 采集 → 混单声道 16kHz → FLAC → base64
   → task/mod.rs  TaskManager 分配 task_id（≤ max_parallel）、CancellationToken、气泡状态
       execute_pipeline:

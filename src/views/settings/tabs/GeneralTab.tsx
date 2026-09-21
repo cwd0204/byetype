@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { AppConfig, AudioDevice, LanguageSetting, LocalApiStatus, ThemeMode } from '../../../core/types'
 import {
   getLaunchAtLogin,
@@ -23,7 +23,66 @@ const DEFAULT_LABEL_KEYS = {
 
 const IS_MACOS = navigator.platform.toUpperCase().includes('MAC')
 
-function formatShortcutDisplay(combo: string): string {
+// 单独修饰键作快捷键：存储值就是 KeyboardEvent.code，Rust 侧 modifier_hotkey.rs 按同一组字面值识别
+const MODIFIER_CODES = [
+  'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight',
+  'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
+] as const
+type ModifierCode = typeof MODIFIER_CODES[number]
+
+function isModifierCode(value: string): value is ModifierCode {
+  return (MODIFIER_CODES as readonly string[]).includes(value)
+}
+
+const MODIFIER_KEY_NAMES = ['Control', 'Alt', 'Shift', 'Meta']
+
+// 修饰键在两个平台上的惯用写法（仅显示用）
+const MODIFIER_SYMBOL: Record<string, { mac: string; win: string }> = {
+  Alt: { mac: '⌥', win: 'Alt' },
+  Meta: { mac: '⌘', win: 'Win' },
+  Control: { mac: '⌃', win: 'Ctrl' },
+  Shift: { mac: '⇧', win: 'Shift' },
+}
+
+// 除字母、数字、F 键、小键盘数字外，global-hotkey 解析器还认这些 KeyboardEvent.code 原名
+const PASSTHROUGH_CODES = new Set([
+  'Space', 'Enter', 'Tab', 'Backspace', 'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+  'Minus', 'Equal', 'BracketLeft', 'BracketRight', 'Backslash', 'Semicolon', 'Quote', 'Backquote',
+  'Comma', 'Period', 'Slash',
+  'CapsLock', 'NumLock', 'ScrollLock', 'PrintScreen', 'Pause',
+  'NumpadAdd', 'NumpadSubtract', 'NumpadMultiply', 'NumpadDivide', 'NumpadDecimal', 'NumpadEnter', 'NumpadEqual',
+])
+
+/**
+ * 从按键事件得到热键解析器认的主键名。用物理键码 e.code 而不是 e.key：
+ * macOS 上 Option+D 的 e.key 是 ∂、Shift+1 是 !，解析器都不认。
+ * 返回 null 表示这个键不能用作快捷键。
+ */
+function keyNameFromEvent(e: React.KeyboardEvent): string | null {
+  const code = e.code
+  if (!code) {
+    // 拿不到物理键码时退回旧逻辑
+    if (e.key === ' ') return 'Space'
+    return e.key || null
+  }
+  const letter = /^Key([A-Z])$/.exec(code)
+  if (letter) return letter[1]
+  const digit = /^Digit([0-9])$/.exec(code)
+  if (digit) return digit[1]
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code
+  if (/^Numpad[0-9]$/.test(code)) return code
+  if (PASSTHROUGH_CODES.has(code)) return code
+  return null
+}
+
+function displayShortcut(combo: string): string {
+  if (isModifierCode(combo)) {
+    const side = combo.endsWith('Left') ? 'left' : 'right'
+    const base = combo.replace(/(Left|Right)$/, '')
+    const symbol = MODIFIER_SYMBOL[base]
+    return t(`general.modKey.${side}`, { key: IS_MACOS ? symbol.mac : symbol.win })
+  }
   // 存储值用热键解析器认的 Super，显示成 Windows 用户认的 Win
   if (!IS_MACOS) return combo.replace(/Super/g, 'Win')
   return combo
@@ -123,21 +182,60 @@ export function GeneralTab({ config, onSave }: Props) {
     extractShortcut2: config.general.extractShortcut2Label?.trim() || defaultLabels.extractShortcut2,
   }
 
-  function createKeyHandler(
+  // 录制中先按下的单独修饰键：松开时如果中间没按别的键，就把它作为快捷键提交
+  const pendingModifier = useRef<string | null>(null)
+
+  const showKeyMessage = (msg: string) => {
+    setConflictMsg(msg)
+    setTimeout(() => setConflictMsg(''), 3000)
+  }
+
+  /**
+   * 生成一个录制框的 keydown / keyup 处理器。
+   * - 普通键 / 组合键在 keydown 提交，主键名取自物理键码（见 keyNameFromEvent）
+   * - 单独修饰键在 keyup 提交，期间按了别的键就按组合键处理
+   * - 结束录制时主动 blur，这样再点同一个框会重新触发 onFocus 进入录制态
+   */
+  function createKeyHandlers(
     setRec: (v: boolean) => void,
     onCapture: (combo: string) => void,
     others: { key: string; label: string }[],
   ) {
-    return (e: React.KeyboardEvent) => {
+    const finish = (e: React.KeyboardEvent<HTMLInputElement>) => {
+      pendingModifier.current = null
+      setRec(false)
+      e.currentTarget.blur()
+    }
+
+    const commit = (combo: string, e: React.KeyboardEvent<HTMLInputElement>) => {
+      const conflict = others.find(o => o.key === combo)
+      if (conflict) {
+        showKeyMessage(t('general.conflictWith', { label: conflict.label }))
+      } else {
+        onCapture(combo)
+      }
+      finish(e)
+    }
+
+    const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
       e.preventDefault()
       if (e.key === 'Escape') {
-        setRec(false)
+        finish(e)
         return
       }
       if (e.key === 'Tab') return
-      if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return
+      if (MODIFIER_KEY_NAMES.includes(e.key)) {
+        pendingModifier.current = isModifierCode(e.code) ? e.code : null
+        return
+      }
 
-      const key = e.key === ' ' ? 'Space' : e.key
+      pendingModifier.current = null
+      const key = keyNameFromEvent(e)
+      if (!key) {
+        // 保持录制态，让用户直接换一个键再试
+        showKeyMessage(t('general.keyUnsupported'))
+        return
+      }
       const parts: string[] = []
       if (e.ctrlKey) parts.push('Ctrl')
       if (e.altKey) parts.push('Alt')
@@ -145,22 +243,22 @@ export function GeneralTab({ config, onSave }: Props) {
       // global-hotkey 只认 Super / Command，不认 Win
       if (e.metaKey) parts.push(IS_MACOS ? 'Command' : 'Super')
       parts.push(key)
-      const combo = parts.join('+')
-
-      const conflict = others.find(o => o.key === combo)
-      if (conflict) {
-        setConflictMsg(t('general.conflictWith', { label: conflict.label }))
-        setTimeout(() => setConflictMsg(''), 3000)
-        setRec(false)
-        return
-      }
-
-      onCapture(combo)
-      setRec(false)
+      commit(parts.join('+'), e)
     }
+
+    const onKeyUp = (e: React.KeyboardEvent<HTMLInputElement>) => {
+      e.preventDefault()
+      if (pendingModifier.current && e.code === pendingModifier.current) {
+        commit(e.code, e)
+      } else if (MODIFIER_KEY_NAMES.includes(e.key)) {
+        pendingModifier.current = null
+      }
+    }
+
+    return { onKeyDown, onKeyUp }
   }
 
-  const handleKeyDown = createKeyHandler(
+  const keys1 = createKeyHandlers(
     setRecording,
     (combo) => update({ shortcut: combo }),
     [
@@ -170,7 +268,7 @@ export function GeneralTab({ config, onSave }: Props) {
     ],
   )
 
-  const handleKeyDown2 = createKeyHandler(
+  const keys2 = createKeyHandlers(
     setRecording2,
     (combo) => update({ shortcut2: combo }),
     [
@@ -180,7 +278,7 @@ export function GeneralTab({ config, onSave }: Props) {
     ],
   )
 
-  const handleExtractKeyDown = createKeyHandler(
+  const extractKeys1 = createKeyHandlers(
     setRecordingExtract,
     (combo) => update({ extractShortcut: combo }),
     [
@@ -190,7 +288,7 @@ export function GeneralTab({ config, onSave }: Props) {
     ],
   )
 
-  const handleExtractKeyDown2 = createKeyHandler(
+  const extractKeys2 = createKeyHandlers(
     setRecordingExtract2,
     (combo) => update({ extractShortcut2: combo }),
     [
@@ -199,6 +297,34 @@ export function GeneralTab({ config, onSave }: Props) {
       { key: config.general.extractShortcut, label: labelOf.extractShortcut },
     ],
   )
+
+  // 录制框：点击进入录制态，显示提示文案；失焦退出
+  const shortcutInputProps = (
+    recording: boolean,
+    setRec: (v: boolean) => void,
+    value: string,
+    handlers: { onKeyDown: React.KeyboardEventHandler<HTMLInputElement>; onKeyUp: React.KeyboardEventHandler<HTMLInputElement> },
+  ): React.InputHTMLAttributes<HTMLInputElement> => ({
+    className: `kbd${recording ? ' recording' : ''}`,
+    value: recording ? t('general.pressShortcut') : displayShortcut(value),
+    onKeyDown: recording ? handlers.onKeyDown : undefined,
+    onKeyUp: recording ? handlers.onKeyUp : undefined,
+    onFocus: () => setRec(true),
+    onMouseDown: () => setRec(true),
+    onBlur: () => {
+      pendingModifier.current = null
+      setRec(false)
+    },
+    readOnly: true,
+    style: { width: 120, textAlign: 'center', cursor: 'pointer' },
+  })
+
+  const usesModifierShortcut = [
+    config.general.shortcut,
+    config.general.shortcut2,
+    config.general.extractShortcut,
+    config.general.extractShortcut2,
+  ].some(isModifierCode)
 
   const themes: { value: ThemeMode; label: string; style: React.CSSProperties }[] = [
     { value: 'light', label: t('general.theme.light'), style: { background: '#ffffff', border: '1px solid #d2d2d7' } },
@@ -260,15 +386,7 @@ export function GeneralTab({ config, onSave }: Props) {
                 <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
-            <input
-              className={`kbd${recording ? ' recording' : ''}`}
-              value={formatShortcutDisplay(config.general.shortcut)}
-              onKeyDown={recording ? handleKeyDown : undefined}
-              onFocus={() => setRecording(true)}
-              onBlur={() => setRecording(false)}
-              readOnly
-              style={{ width: 120, textAlign: 'center', cursor: 'pointer' }}
-            />
+            <input {...shortcutInputProps(recording, setRecording, config.general.shortcut, keys1)} />
           </div>
         </SettingRow>
         <SettingRow label={
@@ -291,15 +409,7 @@ export function GeneralTab({ config, onSave }: Props) {
                 <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
-            <input
-              className={`kbd${recording2 ? ' recording' : ''}`}
-              value={formatShortcutDisplay(config.general.shortcut2)}
-              onKeyDown={recording2 ? handleKeyDown2 : undefined}
-              onFocus={() => setRecording2(true)}
-              onBlur={() => setRecording2(false)}
-              readOnly
-              style={{ width: 120, textAlign: 'center', cursor: 'pointer' }}
-            />
+            <input {...shortcutInputProps(recording2, setRecording2, config.general.shortcut2, keys2)} />
           </div>
         </SettingRow>
         <SettingRow label={t('general.pttMode')} description={t('general.pttModeDesc')}>
@@ -339,15 +449,7 @@ export function GeneralTab({ config, onSave }: Props) {
                 <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
-            <input
-              className={`kbd${recordingExtract ? ' recording' : ''}`}
-              value={formatShortcutDisplay(config.general.extractShortcut)}
-              onKeyDown={recordingExtract ? handleExtractKeyDown : undefined}
-              onFocus={() => setRecordingExtract(true)}
-              onBlur={() => setRecordingExtract(false)}
-              readOnly
-              style={{ width: 120, textAlign: 'center', cursor: 'pointer' }}
-            />
+            <input {...shortcutInputProps(recordingExtract, setRecordingExtract, config.general.extractShortcut, extractKeys1)} />
           </div>
         </SettingRow>
         <SettingRow label={
@@ -369,15 +471,7 @@ export function GeneralTab({ config, onSave }: Props) {
                 <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
-            <input
-              className={`kbd${recordingExtract2 ? ' recording' : ''}`}
-              value={formatShortcutDisplay(config.general.extractShortcut2)}
-              onKeyDown={recordingExtract2 ? handleExtractKeyDown2 : undefined}
-              onFocus={() => setRecordingExtract2(true)}
-              onBlur={() => setRecordingExtract2(false)}
-              readOnly
-              style={{ width: 120, textAlign: 'center', cursor: 'pointer' }}
-            />
+            <input {...shortcutInputProps(recordingExtract2, setRecordingExtract2, config.general.extractShortcut2, extractKeys2)} />
           </div>
         </SettingRow>
       </SettingGroup>
@@ -385,6 +479,11 @@ export function GeneralTab({ config, onSave }: Props) {
       {conflictMsg && (
         <div style={{ color: '#ff3b30', fontSize: 12, padding: '4px 16px' }}>
           {conflictMsg}
+        </div>
+      )}
+      {usesModifierShortcut && (
+        <div style={{ color: 'var(--text-secondary)', fontSize: 12, padding: '4px 16px' }}>
+          {t('general.modKeyHint')}
         </div>
       )}
 
