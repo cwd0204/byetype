@@ -401,13 +401,17 @@ mod tests {
     #[tokio::test]
     #[ignore = "需要 AWS 凭证、网络与音频样本"]
     async fn live_transcribe_chinese_sample() {
-        let cfg = AwsConfig {
+        let mut cfg = AwsConfig {
             transcribe_profile: std::env::var("BYETYPE_TEST_TRANSCRIBE_PROFILE")
                 .unwrap_or_else(|_| "bedrock-kuut".into()),
             transcribe_region: std::env::var("BYETYPE_TEST_TRANSCRIBE_REGION")
                 .unwrap_or_else(|_| "us-east-1".into()),
             ..AwsConfig::default()
         };
+        // 用来对比「auto 多语言识别」与固定单一语言（如 zh-CN）在中英混合语料上的差异
+        if let Ok(language) = std::env::var("BYETYPE_TEST_TRANSCRIBE_LANGUAGE") {
+            cfg.transcribe_language = language;
+        }
 
         test_connectivity(&cfg).await.expect("connectivity");
 

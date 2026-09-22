@@ -314,13 +314,17 @@ mod tests {
     async fn live_stream_transcribe_chinese_sample() {
         use std::time::Instant;
 
-        let cfg = AwsConfig {
+        let mut cfg = AwsConfig {
             transcribe_profile: std::env::var("BYETYPE_TEST_TRANSCRIBE_PROFILE")
                 .unwrap_or_else(|_| "bedrock-kuut".into()),
             transcribe_region: std::env::var("BYETYPE_TEST_TRANSCRIBE_REGION")
                 .unwrap_or_else(|_| "ap-northeast-1".into()),
             ..AwsConfig::default()
         };
+        // 同 transcribe_aws 的那个 live 测试：用来 A/B「auto 多语言识别」与固定单一语言
+        if let Ok(language) = std::env::var("BYETYPE_TEST_TRANSCRIBE_LANGUAGE") {
+            cfg.transcribe_language = language;
+        }
         let wav_path =
             std::env::var("BYETYPE_TEST_WAV").unwrap_or_else(|_| "/tmp/byetype-test-zh.wav".into());
         let wav = std::fs::read(&wav_path).expect("test wav sample");
