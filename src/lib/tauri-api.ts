@@ -176,6 +176,11 @@ export async function regenerateMeetingSummary(id: string): Promise<void> {
   return invoke<void>('meeting_regenerate_summary', { id })
 }
 
+/// 用保留的分段音频重新转写（转写失败的会议用）
+export async function retranscribeMeeting(id: string): Promise<void> {
+  return invoke<void>('meeting_retranscribe', { id })
+}
+
 export async function pickNotesFolder(): Promise<string | null> {
   return invoke<string | null>('meeting_pick_notes_folder')
 }

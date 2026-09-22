@@ -6,11 +6,13 @@ export const bubble: MessageBundle = {
   zh: {
     'bubble.thinking': 'Thinking...',
     'bubble.meetingRecording': '会议录制中',
+    'bubble.meetingWarning': '转写有失败',
     'bubble.summarizing': 'Summarizing...',
   },
   en: {
     'bubble.thinking': 'Thinking...',
     'bubble.meetingRecording': 'Meeting',
+    'bubble.meetingWarning': 'Transcription issue',
     'bubble.summarizing': 'Summarizing...',
   },
 }

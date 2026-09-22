@@ -418,10 +418,11 @@ mod tests {
         let wav_path =
             std::env::var("BYETYPE_TEST_WAV").unwrap_or_else(|_| "/tmp/byetype-test-zh.wav".into());
         let wav = std::fs::read(&wav_path).expect("test wav sample");
+        // 上限给到会议分段的量级（chunk_seconds 最大 600），方便用长样本量实际吞吐
         let normalized = crate::audio::input::normalize_audio(
             wav,
             "audio/wav",
-            60,
+            600,
             &tokio_util::sync::CancellationToken::new(),
         )
         .expect("normalize to flac");

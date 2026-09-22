@@ -48,8 +48,12 @@ Keep English proper nouns in Latin script. Output only the transcript.";
 const TERM_HINT_MAX_CHARS: usize = 300;
 
 /// WAV 体积上限。超过就别发了，交给调用方回落到流式 Transcribe。
-/// 16 kHz 单声道 16 位 = 32 KB/秒，8 MB 约等于 4 分钟。
-const TRANSCRIBE_MAX_WAV_BYTES: usize = 8 * 1024 * 1024;
+///
+/// 实测边界（2026-09-22）：1.83 MB / 60 秒可以，2.75 MB / 90 秒被服务端拒绝
+/// （ValidationException: Failed to buffer the request body），所以真实上限约 2 MB。
+/// 16 kHz 单声道 16 位 = 32 KB/秒，取 1.75 MB ≈ 55 秒，留一点余量。
+/// 超过这个长度的录音只能走 Transcribe —— 这是 Voxtral 这条路的硬约束。
+const TRANSCRIBE_MAX_WAV_BYTES: usize = 1_835_008; // 1.75 MiB
 
 /// Claude 的两代思考参数：
 /// - 4.6 及以后（含 5.x）：`thinking.type = adaptive` + `output_config.effort`
@@ -485,13 +489,30 @@ pub async fn transcribe_audio(
         // 转写要可复现：温度留空会走模型默认采样，同一段音频每次结果都不同
         Some(0.0),
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        if is_payload_too_large(&error) {
+            format!("{}: 请求体过大（{:.1} 秒音频）", NOT_A_TRANSCRIPT, audio_secs)
+        } else {
+            error
+        }
+    })?;
 
     let text = text.trim().to_string();
     if let Some(reason) = transcript_defect(&text, audio_secs) {
         return Err(format!("{}: {}", NOT_A_TRANSCRIPT, reason));
     }
     Ok((text, usage))
+}
+
+/// 服务端因请求体过大拒绝时的特征。上面的体积守卫是第一道，这是兜底：
+/// 万一实际上限比我们估的还小，也要走回落而不是把硬错误抛给用户。
+fn is_payload_too_large(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("failed to buffer the request body")
+        || lower.contains("request body too large")
+        || lower.contains("payload too large")
+        || lower.contains("(413)")
 }
 
 /// 从词汇表文档里抽出紧凑的术语提示：只取 `- ` 开头的条目、去掉括号里的说明、
@@ -914,6 +935,39 @@ mod tests {
             ""
         );
         assert_eq!(term_hint_from_vocabulary(""), "");
+    }
+
+    #[test]
+    fn payload_guard_matches_measured_limit() {
+        // 实测：1.83 MB / 60 秒通过，2.75 MB / 90 秒被拒。守卫要落在两者之间且偏保守。
+        const BYTES_PER_SEC: usize = 16_000 * 2;
+        let ok_60s = 60 * BYTES_PER_SEC + 44;
+        let rejected_90s = 90 * BYTES_PER_SEC + 44;
+        assert!(
+            TRANSCRIBE_MAX_WAV_BYTES < rejected_90s,
+            "守卫 {} 必须小于实测被拒的 {}",
+            TRANSCRIBE_MAX_WAV_BYTES,
+            rejected_90s
+        );
+        // 55 秒以内要放过，别把常见的短听写也挡掉
+        let fifty_five = 55 * BYTES_PER_SEC + 44;
+        assert!(TRANSCRIBE_MAX_WAV_BYTES >= fifty_five);
+        // 60 秒刚好在边界外，符合「约 55 秒」的文档说明
+        assert!(TRANSCRIBE_MAX_WAV_BYTES < ok_60s);
+    }
+
+    #[test]
+    fn payload_too_large_errors_trigger_fallback() {
+        assert!(is_payload_too_large(
+            "Bedrock API error (400): ValidationException: Failed to buffer the request body"
+        ));
+        assert!(is_payload_too_large("Request body too large"));
+        assert!(is_payload_too_large("Bedrock API error (413): too big"));
+        // 别把普通错误也当成体积问题
+        assert!(!is_payload_too_large(
+            "Bedrock API error (403): AccessDeniedException: no permission"
+        ));
+        assert!(!is_payload_too_large("Request timed out"));
     }
 
     /// 真机联调：Voxtral 转写一段真实中文录音。

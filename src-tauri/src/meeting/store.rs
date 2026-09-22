@@ -144,14 +144,22 @@ impl MeetingStore {
         serde_json::from_str(&raw).ok()
     }
 
+    /// 读取转写分段，**按 index 排序并去重**（同 index 保留文件里最后一条）。
+    ///
+    /// 不能依赖追加顺序：分段转写是并发的，重新转写还会为同一个 index 再追加一行。
+    /// 「保留最后一条」正好让重新转写的结果覆盖掉原来失败的那段。
     pub fn read_segments(&self, dir: &Path) -> Vec<TranscriptSegment> {
         let Ok(raw) = fs::read_to_string(dir.join("transcript.jsonl")) else {
             return Vec::new();
         };
-        raw.lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect()
+        let mut by_index: std::collections::BTreeMap<u32, TranscriptSegment> =
+            std::collections::BTreeMap::new();
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            if let Ok(segment) = serde_json::from_str::<TranscriptSegment>(line) {
+                by_index.insert(segment.index, segment);
+            }
+        }
+        by_index.into_values().collect()
     }
 
     /// 追加一段转写并重建 transcript.md。
@@ -221,6 +229,39 @@ impl MeetingStore {
 
     pub fn read_summary(&self, dir: &Path) -> Option<String> {
         fs::read_to_string(dir.join("summary.md")).ok()
+    }
+
+    /// 删掉整个 audio 目录。只在 finalize 且「全部分段成功 + 用户没要求保留」时调用。
+    pub fn remove_audio(&self, dir: &Path) {
+        let audio_dir = dir.join("audio");
+        if audio_dir.exists() {
+            if let Err(error) = fs::remove_dir_all(&audio_dir) {
+                eprintln!("[Meeting] remove audio failed: {}", error);
+            }
+        }
+    }
+
+    /// 列出已保存的分段音频，按 index 升序。给「重新转写」用。
+    pub fn list_chunk_audio(&self, dir: &Path) -> Vec<(u32, PathBuf)> {
+        let audio_dir = dir.join("audio");
+        let Ok(entries) = fs::read_dir(&audio_dir) else {
+            return Vec::new();
+        };
+        let mut chunks: Vec<(u32, PathBuf)> = entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?;
+                let index = name
+                    .strip_prefix("chunk-")?
+                    .strip_suffix(".flac")?
+                    .parse::<u32>()
+                    .ok()?;
+                Some((index, path))
+            })
+            .collect();
+        chunks.sort_by_key(|(index, _)| *index);
+        chunks
     }
 
     pub fn save_chunk_audio(&self, dir: &Path, index: u32, flac: &[u8]) -> Result<PathBuf, String> {
@@ -311,6 +352,65 @@ impl MeetingStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn segments_are_sorted_and_deduped_by_index() {
+        let dir = std::env::temp_dir().join(format!("byetype-meeting-store-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let store = MeetingStore::new(&dir);
+        let meeting = dir.join("m1");
+        fs::create_dir_all(&meeting).unwrap();
+
+        let seg = |index: u32, text: &str, failed: bool| TranscriptSegment {
+            index,
+            start_secs: index as u64 * 60,
+            end_secs: index as u64 * 60 + 60,
+            text: text.to_string(),
+            failed,
+        };
+        // 并发转写会乱序落盘
+        store.append_segment(&meeting, &seg(2, "第三段", false)).unwrap();
+        store.append_segment(&meeting, &seg(0, "第一段", false)).unwrap();
+        store.append_segment(&meeting, &seg(1, "[转写失败]", true)).unwrap();
+        // 重新转写为同一个 index 再追加一行，应当覆盖失败的那条
+        store.append_segment(&meeting, &seg(1, "第二段", false)).unwrap();
+
+        let segments = store.read_segments(&meeting);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["第一段", "第二段", "第三段"]);
+        assert!(segments.iter().all(|s| !s.failed));
+
+        // transcript.md 也要按顺序
+        let md = store.read_transcript_md(&meeting).unwrap();
+        let first = md.find("第一段").unwrap();
+        let second = md.find("第二段").unwrap();
+        let third = md.find("第三段").unwrap();
+        assert!(first < second && second < third, "md 顺序不对:\n{md}");
+        assert!(!md.contains("[转写失败]"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_helpers_list_sorted_and_remove_all() {
+        let dir = std::env::temp_dir().join(format!("byetype-meeting-audio-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = MeetingStore::new(&dir);
+        let meeting = dir.join("m2");
+        fs::create_dir_all(&meeting).unwrap();
+        for index in [3u32, 0, 11] {
+            store.save_chunk_audio(&meeting, index, b"fake flac").unwrap();
+        }
+        let listed: Vec<u32> = store.list_chunk_audio(&meeting).into_iter().map(|(i, _)| i).collect();
+        assert_eq!(listed, vec![0, 3, 11], "要按 index 升序，不是字典序");
+
+        store.remove_audio(&meeting);
+        assert!(store.list_chunk_audio(&meeting).is_empty());
+        // 再删一次不能 panic
+        store.remove_audio(&meeting);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn temp_store(name: &str) -> (MeetingStore, PathBuf) {

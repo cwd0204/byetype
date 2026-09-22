@@ -94,6 +94,12 @@ pub async fn meeting_regenerate_summary(app: AppHandle, id: String) -> Result<()
     session::regenerate_summary(&app, &id).await
 }
 
+/// 拿保留的分段音频重新转写（转写失败的会议用）。
+#[tauri::command]
+pub async fn meeting_retranscribe(app: AppHandle, id: String) -> Result<(), String> {
+    session::retranscribe(&app, &id).await
+}
+
 #[tauri::command]
 pub async fn meeting_pick_notes_folder(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;

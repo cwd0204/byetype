@@ -57,7 +57,33 @@ pub fn migrate_if_needed(raw: &mut Value) -> bool {
         migrated = true;
     }
 
+    // 迁移4：抬高过小的会议分段转写超时
+    if migrate_chunk_timeout(raw) {
+        migrated = true;
+    }
+
     migrated
+}
+
+/// 老配置里 `meeting.chunkTimeoutSecs` 默认 120 秒，而 240 秒的分段实际要 350 秒上下
+/// （Transcribe 整段上传按约 1.06 倍实时消费），于是每一段都必然超时，长会议一个字都转不出来。
+/// 这里按分段长度算出下限并抬上去。条件检测、幂等。
+fn migrate_chunk_timeout(raw: &mut Value) -> bool {
+    let Some(meeting) = raw.get_mut("meeting") else {
+        return false;
+    };
+    let chunk_seconds = meeting
+        .get("chunkSeconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(240) as u32;
+    let min = crate::config::types::min_chunk_timeout(chunk_seconds) as u64;
+    match meeting.get("chunkTimeoutSecs").and_then(|v| v.as_u64()) {
+        Some(current) if current < min => {
+            meeting["chunkTimeoutSecs"] = Value::from(min);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// 最早期结构：transcribe.model / geminiApiKey / optimize.openaiCompat。
@@ -351,6 +377,38 @@ mod tests {
         assert_eq!(raw["meeting"]["transcribeModelId"], "");
         assert_eq!(raw["meeting"]["summaryModelId"], DEFAULT_TEXT_MODEL);
         assert_eq!(raw["meeting"]["summaryThinking"]["level"], "LOW");
+    }
+
+    #[test]
+    fn raises_too_small_chunk_timeout() {
+        // 老配置：240 秒分段配 120 秒超时，每段必然超时（这就是长会议转不出字的原因）
+        let mut raw = serde_json::json!({
+            "meeting": { "chunkSeconds": 240, "chunkTimeoutSecs": 120 }
+        });
+        assert!(migrate_chunk_timeout(&mut raw));
+        assert_eq!(raw["meeting"]["chunkTimeoutSecs"], 426);
+        // 幂等：再跑一次不再改动
+        assert!(!migrate_chunk_timeout(&mut raw));
+    }
+
+    #[test]
+    fn chunk_timeout_migration_respects_chunk_length() {
+        let mut short = serde_json::json!({
+            "meeting": { "chunkSeconds": 60, "chunkTimeoutSecs": 60 }
+        });
+        assert!(migrate_chunk_timeout(&mut short));
+        assert_eq!(short["meeting"]["chunkTimeoutSecs"], 210);
+
+        // 已经够大的不动
+        let mut fine = serde_json::json!({
+            "meeting": { "chunkSeconds": 240, "chunkTimeoutSecs": 900 }
+        });
+        assert!(!migrate_chunk_timeout(&mut fine));
+        assert_eq!(fine["meeting"]["chunkTimeoutSecs"], 900);
+
+        // 没有 meeting 段不能 panic
+        let mut empty = serde_json::json!({});
+        assert!(!migrate_chunk_timeout(&mut empty));
     }
 
     #[test]

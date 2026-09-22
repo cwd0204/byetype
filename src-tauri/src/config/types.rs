@@ -84,7 +84,19 @@ fn default_chunk_seconds() -> u32 {
 }
 
 fn default_chunk_timeout() -> u32 {
-    120
+    // 默认分段 240 秒，实际最长 330 秒（chunker 在静音处切，硬上限 +90 秒），
+    // Amazon Transcribe 整段上传按约 1.06 倍实时消费，所以一段要 350 秒上下。
+    // 老默认值 120 秒必然超时 —— 这就是长会议一个字都转不出来的原因。
+    600
+}
+
+/// 分段转写超时的下限：必须覆盖「最长的分段 × 实际吞吐」。
+///
+/// `+90` 是 chunker 的硬上限余量（`chunk_seconds + 90` 才强制切段），
+/// `× 6 / 5` 覆盖实测的 1.06 倍实时消费再留头，`+30` 留给建流与收尾。
+/// 240 秒分段 → 426 秒；60 秒 → 210 秒；600 秒 → 858 秒。
+pub fn min_chunk_timeout(chunk_seconds: u32) -> u32 {
+    (chunk_seconds + 90) * 6 / 5 + 30
 }
 
 fn default_summary_timeout() -> u32 {
@@ -156,6 +168,14 @@ impl AppConfig {
         }
         if meeting.chunk_timeout_secs < 30 || meeting.summary_timeout_secs < 30 {
             return Err("会议转写 / 纪要超时不能少于 30 秒".to_string());
+        }
+        // 跨字段规则：超时短于分段实际需要的时间，每一段都会必然超时。
+        let min_timeout = min_chunk_timeout(meeting.chunk_seconds);
+        if meeting.chunk_timeout_secs < min_timeout {
+            return Err(format!(
+                "分段时长 {} 秒时，分段转写超时不能少于 {} 秒（否则每段都会超时）",
+                meeting.chunk_seconds, min_timeout
+            ));
         }
         Ok(())
     }
@@ -540,6 +560,35 @@ impl Default for AppConfig {
 
 #[cfg(test)]
 mod meeting_tests {
+    #[test]
+    fn chunk_timeout_floor_covers_real_chunk_length() {
+        // chunker 实际会切到 chunk_seconds + 90 秒，Transcribe 整段上传约 1.06 倍实时，
+        // 所以下限必须明显大于分段长度本身
+        assert_eq!(min_chunk_timeout(240), 426);
+        assert_eq!(min_chunk_timeout(60), 210);
+        assert_eq!(min_chunk_timeout(600), 858);
+        for chunk in [60u32, 120, 240, 600] {
+            assert!(
+                min_chunk_timeout(chunk) > chunk * 6 / 5,
+                "{chunk} 秒分段的下限 {} 不够",
+                min_chunk_timeout(chunk)
+            );
+        }
+    }
+
+    #[test]
+    fn default_meeting_config_passes_its_own_validation() {
+        // 老默认值（240 秒分段 + 120 秒超时）会让每段必然超时，validate 必须拦住这种组合
+        let config = AppConfig::default();
+        config.validate().expect("默认配置应当合法");
+        assert!(config.meeting.chunk_timeout_secs >= min_chunk_timeout(config.meeting.chunk_seconds));
+
+        let mut bad = AppConfig::default();
+        bad.meeting.chunk_timeout_secs = 120;
+        let error = bad.validate().expect_err("120 秒超时配 240 秒分段必须被拒");
+        assert!(error.contains("426"), "{error}");
+    }
+
     use super::*;
 
     #[test]

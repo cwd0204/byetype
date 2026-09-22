@@ -86,6 +86,7 @@ pub fn run() {
             meeting::commands::meeting_delete,
             meeting::commands::meeting_save_summary,
             meeting::commands::meeting_regenerate_summary,
+            meeting::commands::meeting_retranscribe,
             meeting::commands::meeting_pick_notes_folder,
             meeting::commands::meeting_notes_folder,
             meeting::commands::meeting_reveal,

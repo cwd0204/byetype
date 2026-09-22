@@ -151,6 +151,18 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
             "This meeting has no usable transcript",
         ),
         "err.chunkFailed" => ("[转写失败：{error}]", "[Transcription failed: {error}]"),
+        "err.meetingNoAudio" => (
+            "这场会议没有保留音频，无法重新转写",
+            "No audio kept for this meeting, cannot re-transcribe",
+        ),
+        "err.meetingNothingToRetry" => (
+            "没有需要重新转写的分段",
+            "No chunks need re-transcribing",
+        ),
+        "err.chunkFailedLive" => (
+            "第 {index} 段转写失败：{error}",
+            "Chunk {index} failed to transcribe: {error}",
+        ),
         "err.taskCancelled" => ("任务已取消", "Task cancelled"),
         "err.pickFolderCancelled" => ("选择目录已取消", "Folder selection cancelled"),
         "err.pickFolderInvalid" => (

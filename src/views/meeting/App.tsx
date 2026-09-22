@@ -10,6 +10,7 @@ import {
   listMeetings,
   onEvent,
   regenerateMeetingSummary,
+  retranscribeMeeting,
   revealMeeting,
   saveMeetingSummary,
   startMeeting,
@@ -277,6 +278,10 @@ export default function App() {
                     <>
                       {(meta.status === 'summary_failed' || meta.status === 'interrupted' || meta.status === 'done') && (
                         <button className="btn" disabled={busy !== null} onClick={() => run('regen', () => regenerateMeetingSummary(meta.id))}>{meta.status === 'done' ? t('meetingWindow.regenerateSummary') : t('meetingWindow.generateSummary')}</button>
+                      )}
+                      {/* 有分段转写失败时才有得救：用保留的音频重转。failed 状态以前连按钮都没有 */}
+                      {(meta.failedChunks ?? 0) > 0 && (
+                        <button className="btn" disabled={busy !== null} onClick={() => run('retranscribe', () => retranscribeMeeting(meta.id))}>{t('meetingWindow.retranscribe')}</button>
                       )}
                       <button className="btn" onClick={() => revealMeeting(meta.id).catch(() => {})}>{t(IS_MACOS ? 'meetingWindow.revealInFinder' : 'meetingWindow.revealInExplorer')}</button>
                       <button className="btn danger" disabled={busy !== null} onClick={() => { if (confirm(t('meetingWindow.confirmDelete'))) run('delete', async () => { await deleteMeeting(meta.id); setSelectedId(null); await refreshList() }) }}>{t('common.delete')}</button>

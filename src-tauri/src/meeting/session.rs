@@ -29,6 +29,14 @@ use crate::i18n::{tr, tr_fmt};
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(600);
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 同时转写几个分段。Transcribe 整段上传按约 1.06 倍实时消费，串行消费追不上
+/// 实时产出的分段，长会议在停止时会积压一大截；并发 2 个把有效吞吐压到约 0.53 倍实时。
+const TRANSCRIBE_CONCURRENCY: usize = 2;
+
+/// 分段转写的重试次数。一次尝试就是分钟级，`advanced.max_retries`（默认 3）会让
+/// 单段最坏烧到 4 × 超时，把 DRAIN_TIMEOUT 撑爆、丢掉尾部分段，所以这里单独收紧。
+const CHUNK_MAX_RETRIES: u32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionPhase {
@@ -200,6 +208,12 @@ impl MeetingManager {
                 .as_ref()
                 .map(|(fid, _)| fid == id)
                 .unwrap_or(false)
+    }
+
+    /// 录制期间出现问题时写入，会议窗口页脚会立刻显示。
+    /// 以前 last_error 只在启动失败与收尾时写，所以分段一直失败也悄无声息。
+    pub fn set_last_error(&self, error: String) {
+        *lock(&self.last_error) = Some(error);
     }
 
     /// 广播状态给前端与托盘。
@@ -433,53 +447,88 @@ struct TranscriberCtx {
     chunks_pending: Arc<AtomicU32>,
 }
 
-/// 串行消费分段（保证顺序），失败的段记成占位并继续。
+/// 并发消费分段（最多 `TRANSCRIBE_CONCURRENCY` 个同时在转），失败的段记成占位并继续。
+///
+/// 顺序不再依赖完成顺序：`store::read_segments` 按 index 排序去重，前端实时路径也按
+/// index 排序，所以乱序完成不影响 transcript.md 与界面。
 async fn run_transcriber(ctx: TranscriberCtx, mut rx: tokio::sync::mpsc::Receiver<ReadyChunk>) {
-    while let Some(chunk) = rx.recv().await {
-        if ctx.cancel.is_cancelled() {
-            break;
+    let ctx = Arc::new(ctx);
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        // 并发已满就先等一个完成，别把队列里的分段一口气全领走
+        if tasks.len() >= TRANSCRIBE_CONCURRENCY {
+            tasks.join_next().await;
+            continue;
         }
-        let config = ctx.app.state::<ConfigManager>().get();
-        if config.meeting.keep_audio {
-            if let Err(error) = ctx
-                .store
-                .save_chunk_audio(&ctx.dir, chunk.index, &chunk.flac)
-            {
-                eprintln!("[Meeting] keep audio failed: {}", error);
-            }
+        tokio::select! {
+            next = rx.recv() => match next {
+                Some(chunk) => {
+                    if ctx.cancel.is_cancelled() {
+                        break;
+                    }
+                    let ctx = ctx.clone();
+                    tasks.spawn(async move { transcribe_and_record(ctx, chunk).await });
+                }
+                // 采集侧已收尾，等在途的转完
+                None => break,
+            },
+            _ = ctx.cancel.cancelled() => break,
         }
-
-        let (text, failed) = match transcribe_one(&ctx, &config, &chunk).await {
-            Ok(text) => (text, false),
-            Err(error) => {
-                eprintln!("[Meeting] chunk {} failed: {}", chunk.index, error);
-                (tr_fmt("err.chunkFailed", &[("error", error.as_str())]), true)
-            }
-        };
-
-        let segment = TranscriptSegment {
-            index: chunk.index,
-            start_secs: chunk.start_offset_secs,
-            end_secs: chunk.start_offset_secs + chunk.duration_secs.round() as u64,
-            text,
-            failed,
-        };
-        if let Err(error) = ctx.store.append_segment(&ctx.dir, &segment) {
-            eprintln!("[Meeting] append segment failed: {}", error);
-        }
-        ctx.chunks_done.fetch_add(1, Ordering::SeqCst);
-        let _ = ctx
-            .chunks_pending
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                Some(v.saturating_sub(1))
-            });
-
-        let _ = ctx.app.emit(
-            "meeting-transcript-appended",
-            serde_json::json!({ "meetingId": ctx.meeting_id, "segment": segment }),
-        );
-        ctx.app.state::<MeetingManager>().after_change();
     }
+    while tasks.join_next().await.is_some() {}
+}
+
+/// 转写一个分段并落盘、通知前端。音频**无条件先存**，这样转写失败时还能重来。
+async fn transcribe_and_record(ctx: Arc<TranscriberCtx>, chunk: ReadyChunk) {
+    let config = ctx.app.state::<ConfigManager>().get();
+    // 不再看 keep_audio：失败的会议必须能重新转写，所以录制期间一律留音频，
+    // 由 finalize 决定去留（全部成功且用户没要求保留时才删）。
+    if let Err(error) = ctx
+        .store
+        .save_chunk_audio(&ctx.dir, chunk.index, &chunk.flac)
+    {
+        eprintln!("[Meeting] save chunk audio failed: {}", error);
+    }
+
+    let (text, failed) = match transcribe_one(&ctx, &config, &chunk).await {
+        Ok(text) => (text, false),
+        Err(error) => {
+            eprintln!("[Meeting] chunk {} failed: {}", chunk.index, error);
+            // 第一段失败就让用户看见：会议窗口页脚读的是 last_error，
+            // 以前只在启动失败和收尾时才写，用户要等到会议结束才知道全崩了。
+            ctx.app
+                .state::<MeetingManager>()
+                .set_last_error(tr_fmt(
+                    "err.chunkFailedLive",
+                    &[("index", (chunk.index + 1).to_string().as_str()), ("error", error.as_str())],
+                ));
+            let _ = crate::bubble::show_meeting(&ctx.app, "meeting-warning", Some(4000));
+            (tr_fmt("err.chunkFailed", &[("error", error.as_str())]), true)
+        }
+    };
+
+    let segment = TranscriptSegment {
+        index: chunk.index,
+        start_secs: chunk.start_offset_secs,
+        end_secs: chunk.start_offset_secs + chunk.duration_secs.round() as u64,
+        text,
+        failed,
+    };
+    if let Err(error) = ctx.store.append_segment(&ctx.dir, &segment) {
+        eprintln!("[Meeting] append segment failed: {}", error);
+    }
+    ctx.chunks_done.fetch_add(1, Ordering::SeqCst);
+    let _ = ctx
+        .chunks_pending
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            Some(v.saturating_sub(1))
+        });
+
+    let _ = ctx.app.emit(
+        "meeting-transcript-appended",
+        serde_json::json!({ "meetingId": ctx.meeting_id, "segment": segment }),
+    );
+    ctx.app.state::<MeetingManager>().after_change();
 }
 
 async fn transcribe_one(
@@ -491,7 +540,7 @@ async fn transcribe_one(
     tokio::select! {
         result = ai::retry::with_retry(
             attempt,
-            config.advanced.max_retries,
+            CHUNK_MAX_RETRIES,
             config.meeting.chunk_timeout_secs,
             |attempt| eprintln!("[Meeting] chunk {} retry #{}", chunk.index, attempt),
         ) => result,
@@ -601,6 +650,12 @@ async fn finalize_inner(
     meta.status = "finalizing".to_string();
     store.write_meta(dir, &meta)?;
 
+    // 音频去留：录制期间一律留着（失败才有得救），到这里才决定删不删。
+    // 有任何分段失败就保留，用户可以「重新转写」。
+    if !config.meeting.keep_audio && meta.failed_chunks == 0 {
+        store.remove_audio(dir);
+    }
+
     let transcript = store.transcript_body(dir);
     if transcript.trim().is_empty() {
         meta.status = "failed".to_string();
@@ -666,6 +721,130 @@ pub(crate) async fn generate_summary(
 }
 
 /// 对已结束的会议重新生成纪要（首次失败、或用户改了提示词之后）。
+/// 重新转写一场失败的会议：拿 `audio/` 里保存的分段重跑转写，再生成纪要。
+///
+/// 只补失败的段（成功的段按 index 保留），转写结果按 index 追加，
+/// `store::read_segments` 的「同 index 保留最后一条」会让新结果覆盖旧的失败占位。
+pub async fn retranscribe(app: &AppHandle, id: &str) -> Result<(), String> {
+    let (store, active) = {
+        let manager = app.state::<MeetingManager>();
+        (manager.store.clone(), manager.is_active(id))
+    };
+    if active {
+        return Err(tr("err.meetingStillActive").to_string());
+    }
+    let config = app.state::<ConfigManager>().get();
+    let dir = store.dir_of(id);
+    let mut meta = store
+        .read_meta(&dir)
+        .ok_or_else(|| tr_fmt("err.meetingNotFound", &[("id", id)]))?;
+
+    let audio = store.list_chunk_audio(&dir);
+    if audio.is_empty() {
+        return Err(tr("err.meetingNoAudio").to_string());
+    }
+    // 只重转失败的段；没有分段记录（比如老会议）时全部重转
+    let existing = store.read_segments(&dir);
+    let failed: std::collections::BTreeSet<u32> = existing
+        .iter()
+        .filter(|s| s.failed)
+        .map(|s| s.index)
+        .collect();
+    let todo: Vec<(u32, std::path::PathBuf)> = audio
+        .into_iter()
+        .filter(|(index, _)| existing.is_empty() || failed.contains(index))
+        .collect();
+    if todo.is_empty() {
+        return Err(tr("err.meetingNothingToRetry").to_string());
+    }
+
+    meta.status = "finalizing".to_string();
+    meta.error = None;
+    store.write_meta(&dir, &meta)?;
+    let _ = app.emit("meeting-list-updated", ());
+
+    let mut still_failed = 0u32;
+    for (index, path) in todo {
+        let Ok(flac) = std::fs::read(&path) else {
+            eprintln!("[Meeting] 读取分段音频失败: {}", path.display());
+            still_failed += 1;
+            continue;
+        };
+        // 复用原有的每段转写：同一个模型解析、超时与重试策略
+        let chunk = ReadyChunk {
+            index,
+            start_offset_secs: existing
+                .iter()
+                .find(|s| s.index == index)
+                .map(|s| s.start_secs)
+                .unwrap_or(0),
+            duration_secs: (flac.len() as f32 / 16_000.0 / 2.0).max(1.0),
+            flac,
+        };
+        let text = match ai::retry::with_retry(
+            || transcribe::transcribe_chunk(&config, &chunk),
+            CHUNK_MAX_RETRIES,
+            config.meeting.chunk_timeout_secs,
+            |attempt| eprintln!("[Meeting] 重新转写第 {} 段 retry #{}", index, attempt),
+        )
+        .await
+        {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("[Meeting] 重新转写第 {} 段失败: {}", index, error);
+                still_failed += 1;
+                tr_fmt("err.chunkFailed", &[("error", error.as_str())])
+            }
+        };
+        let failed_now = still_failed > 0 && text.starts_with('[');
+        let segment = TranscriptSegment {
+            index,
+            start_secs: chunk.start_offset_secs,
+            end_secs: existing
+                .iter()
+                .find(|s| s.index == index)
+                .map(|s| s.end_secs)
+                .unwrap_or(chunk.start_offset_secs + chunk.duration_secs.round() as u64),
+            text,
+            failed: failed_now,
+        };
+        if let Err(error) = store.append_segment(&dir, &segment) {
+            eprintln!("[Meeting] append segment failed: {}", error);
+        }
+        let _ = app.emit(
+            "meeting-transcript-appended",
+            serde_json::json!({ "meetingId": id, "segment": segment }),
+        );
+    }
+
+    meta.failed_chunks = store.read_segments(&dir).iter().filter(|s| s.failed).count() as u32;
+    let transcript = store.transcript_body(&dir);
+    if transcript.trim().is_empty() {
+        meta.status = "failed".to_string();
+        meta.error = Some(tr("err.noTranscript").to_string());
+        store.write_meta(&dir, &meta)?;
+        let _ = app.emit("meeting-list-updated", ());
+        return Err(tr("err.noTranscriptForSummary").to_string());
+    }
+    if meta.failed_chunks == 0 && !config.meeting.keep_audio {
+        store.remove_audio(&dir);
+    }
+
+    let result = generate_summary(app, &config, &store, &dir, &mut meta, &transcript).await;
+    store.write_meta(&dir, &meta)?;
+    let _ = app.emit("meeting-list-updated", ());
+    let _ = app.emit(
+        "meeting-finished",
+        serde_json::json!({
+            "meetingId": id,
+            "ok": result.is_ok(),
+            "error": result.as_ref().err(),
+            "notesPath": result.as_ref().ok().cloned().flatten(),
+        }),
+    );
+    result.map(|_| ())
+}
+
 pub async fn regenerate_summary(app: &AppHandle, id: &str) -> Result<(), String> {
     let (store, active) = {
         let manager = app.state::<MeetingManager>();

@@ -36,6 +36,8 @@ const looks: Record<string, Look> = {
   failed:       { shape: 'is-round', color: 'c-failed', glyph: '✕' },
   // 会议记录（独立的 bubble-meeting 窗口）：✕ 是「停止录制」而不是取消任务
   'meeting-detected':    { shape: 'is-pill', color: 'c-recording', labelKey: 'bubble.meetingRecording', dot: true, cancel: true },
+  // 录制期间某个分段转写失败：橙色警示，✕ 仍然是「停止录制」
+  'meeting-warning':     { shape: 'is-pill', color: 'c-retrying', labelKey: 'bubble.meetingWarning', dot: true, cancel: true },
   'meeting-summarizing': { shape: 'is-pill', color: 'c-thinking', labelKey: 'bubble.summarizing' },
   'meeting-done':        { shape: 'is-round', color: 'c-completed', glyph: '✓' },
   'meeting-failed':      { shape: 'is-round', color: 'c-failed', glyph: '✕' },

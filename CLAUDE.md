@@ -115,6 +115,10 @@ detector.rs   每 detect_poll_secs 秒 pgrep -x CptHost（Zoom 只在开会时�
 ```
 
 - 配置在 `config.meeting`；纪要模型默认 `builtin-bedrock-claude-sonnet-5`，转写模型为空时跟随听写的转写模型
+- **分段转写超时必须覆盖分段长度**：Transcribe 整段上传按约 1.06 倍实时消费（实测 64.5 秒音频耗时 68.5 秒），而 chunker 实际切出 `chunk_seconds` 到 `chunk_seconds + 90` 秒的段，所以超时下限是 `types::min_chunk_timeout()`（240 秒分段 → 426 秒）。老默认值 120 秒让每段必然超时，长会议一个字都转不出来；`validate()` 有跨字段规则拦住这种组合，`migration.rs` 的 `migrate_chunk_timeout` 负责抬高旧配置
+- 分段转写并发 `TRANSCRIBE_CONCURRENCY = 2`（串行追不上实时产出），重试收紧到 `CHUNK_MAX_RETRIES = 1`（一次尝试就是分钟级）。并发意味着**落盘顺序不可信**：`store::read_segments` 按 index 排序并去重（同 index 保留最后一条，重新转写靠这个覆盖失败段）
+- 录制期间音频**无条件保留**，finalize 时才按「全部成功且未开 keep_audio」决定删不删；失败的会议留着音频，可以用 `meeting_retranscribe` 命令重转（会议窗口在 `failedChunks > 0` 时显示「重新转写」）
+- 分段失败会立刻写 `MeetingStatus.last_error` 并让气泡转 `meeting-warning` 橙色态，不再等到会议结束才告知
 - 托盘的「开始/停止会议录制」「自动检测 Zoom 会议」由 `tray::update_meeting_items` 刷新；托盘图标由听写与会议两个状态合成（`tray::set_dictation_recording` / `set_meeting_recording`）
 - 系统音频需要 `Info.plist` 的 `NSAudioCaptureUsageDescription` 与 TCC「仅系统音频录制」授权；设置页的「请求权限」调用 `macos_tap::probe` 提前触发弹窗
 - Windows 侧只有探测（`CptHost.exe`），系统音频后端未实现，会退化成只录麦克风
