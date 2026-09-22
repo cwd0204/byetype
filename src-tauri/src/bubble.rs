@@ -47,7 +47,7 @@ fn cursor_position() -> (f64, f64) {
     (100.0, 100.0)
 }
 
-fn label_for(task_id: u32) -> String {
+pub(crate) fn label_for(task_id: u32) -> String {
     // 钳制到预创建池大小,与 gen_index 保持一致,
     // 避免 max_parallel 超过 MAX_BUBBLES 时 get_webview_window 返回 None。
     let slot = task_id.min(MAX_BUBBLES);

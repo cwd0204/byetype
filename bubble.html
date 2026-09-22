@@ -32,9 +32,16 @@
                   box-shadow 0.32s ease;
     }
 
-    /* 形状：圆形（录音/完成/失败） 与 药丸（各种 Thinking） */
+    /* 形状：圆形（完成/失败）、药丸（各种 Thinking）、波形（准备中/录音中） */
     .shape.is-round { width: 34px; border-radius: 50%; }
     .shape.is-pill  { width: 130px; border-radius: 20px; }
+    /* 波形单独一个类而不是复用 is-pill：波形画布的宽度是由这里的宽度减去 padding
+       推出来的，共用会让以后改 Thinking 药丸的宽度悄悄改坏波形。
+       animation-play-state 是按 animation-name 的位置对应的列表：索引 0 的 bounceIn
+       早就播完（both 保留终态）继续 running，只冻结索引 1 的 wave 渐变。
+       波形自己每拍重绘一次（25Hz），没必要再让渐变按屏幕刷新率重绘一遍；
+       暂停的动画保留时间轴，切到 Thinking 药丸时原地恢复。 */
+    .shape.is-wave  { width: 130px; border-radius: 20px; animation-play-state: running, paused; }
 
     /* 准备中：麦克风还没送出音频（蓝牙握手期）。
        用一层灰色遮罩淡入淡出，而不是 filter: grayscale ——
@@ -80,9 +87,13 @@
       box-shadow: 0 2px 8px rgba(149,165,166,0.4);
     }
 
-    /* 内容元素：压在遮罩之上，按状态显隐 */
-    .dot, .label, .glyph, .cancel-btn { position: relative; z-index: 1; }
+    /* 内容元素：压在遮罩之上，按状态显隐。
+       .wave 必须也在这一行里，否则准备中的灰色遮罩会盖住波形。 */
+    .dot, .label, .glyph, .cancel-btn, .wave { position: relative; z-index: 1; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: white; flex: none; }
+    /* 波形画布。min-width: 0 是必须的：canvas 作为 flex item 的自动最小尺寸等于它的
+       width 属性，不写这一行它会撑破容器。 */
+    .wave { width: 100%; height: 20px; min-width: 0; display: block; }
     .glyph { font-size: 18px; font-weight: bold; line-height: 1; }
     .cancel-btn {
       margin-left: 8px;
@@ -94,8 +105,8 @@
     .cancel-btn:hover { color: rgba(255, 255, 255, 1); }
 
     /* === 动画 ===
-       bounceIn 峰值从 1.18 降到 1.10：药丸宽 130px，1.18 倍会超出
-       140px 的气泡窗口被系统裁掉，看起来就是弹出时缺了两边。 */
+       bounceIn 峰值压到 1.06：药丸宽 130px，130 × 1.06 = 137.8px 刚好在 140px 的
+       气泡窗口里；再高（比如 1.10 的 143px）会被系统裁掉，看起来就是弹出时缺了两边。 */
     @keyframes bounceIn {
       0%   { transform: scale(0.4); opacity: 0; }
       55%  { transform: scale(1.06); opacity: 1; }

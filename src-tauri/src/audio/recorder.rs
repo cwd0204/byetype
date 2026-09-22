@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::SampleFormat;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -12,12 +12,67 @@ use super::encoder;
 /// 真实麦克风即使在安静环境也有本底噪声，不会是精确的 0。
 const READY_RMS_THRESHOLD: f32 = 0.00002;
 
+/// 电平映射到 0..1 的 dBFS 区间与曲线。实测语音短时 RMS：安静房间 -65..-52 dBFS，
+/// 正常说话 -30..-22，大声 -20..-14。地板取 -55 让室内底噪压成平线，顶值取 -12
+/// 让正常说话落在中间高度而不是长期贴顶；gamma 再把安静端压扁一些。
+const DB_FLOOR: f32 = -55.0;
+const DB_CEIL: f32 = -12.0;
+const LEVEL_GAMMA: f32 = 1.6;
+/// 低于这个显示值直接归零，保证没人说话时是一条平线。
+/// 配合上面的区间与 gamma，归零的边界落在约 -48.3 dBFS：安静房间（-65..-52）一定是 0，
+/// 再高一点的风扇底噪即使没被归零也只有 1px 左右，和基线一样粗，看着仍是平的。
+const LEVEL_GATE: f32 = 0.05;
+/// 显示值的快起慢落系数（配 40ms 一拍）。上行快，看得出起音；下行略慢，不抖。
+const LEVEL_ATTACK: f32 = 0.60;
+const LEVEL_RELEASE: f32 = 0.35;
+
 fn rms(data: &[f32]) -> f32 {
     if data.is_empty() {
         return 0.0;
     }
     let sum: f32 = data.iter().map(|s| s * s).sum();
     (sum / data.len() as f32).sqrt()
+}
+
+/// RMS → 0..1 的波形显示高度。
+pub(crate) fn level_from_rms(rms: f32) -> f32 {
+    if !rms.is_finite() || rms <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * rms.max(1e-7).log10();
+    let norm = ((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR)).clamp(0.0, 1.0);
+    let level = norm.powf(LEVEL_GAMMA);
+    if level < LEVEL_GATE {
+        0.0
+    } else {
+        level
+    }
+}
+
+/// 在音频回调线程里上报电平。用 `fetch_max` 而不是 `store`，这样一拍里的多个缓冲
+/// 取峰值而不是只剩最后一个。
+///
+/// `is_finite` 守卫是必须的：NaN / inf 的 bit 模式大于任何有限正浮点的 bit 模式，
+/// 一旦被 `fetch_max` 写进去就再也降不下来，波形会永久顶格。
+fn publish_level(level: &AtomicU32, rms: f32) {
+    if rms.is_finite() && rms > 0.0 {
+        level.fetch_max(rms.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// 一阶平滑，上行与下行用不同系数。
+pub(crate) fn smooth(prev: f32, target: f32) -> f32 {
+    let coeff = if target > prev {
+        LEVEL_ATTACK
+    } else {
+        LEVEL_RELEASE
+    };
+    let next = prev + (target - prev) * coeff;
+    if next.is_finite() {
+        next.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,11 +120,15 @@ pub struct AudioRecorder {
     /// 首个音频回调是否已到达。蓝牙耳机要先完成 HFP 握手才会送数据，
     /// 这段时间 CoreAudio 不回调，用这个标志告诉 UI 何时真正可以开口。
     audio_started: Arc<AtomicBool>,
+    /// 最近一批音频的 RMS（f32 的 bit 表示），给气泡波形用。
+    /// 回调用 `fetch_max` 累积：UI 一拍 40ms 里有约 4 个音频缓冲，取最大值才不会
+    /// 丢掉其中 3 个。读取方 `take_level` 取走即清零，所以设备停止回调时读到 0。
+    level: Arc<AtomicU32>,
 }
 
-// SAFETY: All fields are protected by Mutex. cpal::Stream is !Send/!Sync only
-// due to platform marker types, but we never access the stream without holding
-// the lock, so cross-thread usage is safe.
+// SAFETY: All fields are protected by a Mutex or are atomics. cpal::Stream is
+// !Send/!Sync only due to platform marker types, but we never access the stream
+// without holding the lock, so cross-thread usage is safe.
 unsafe impl Send for AudioRecorder {}
 unsafe impl Sync for AudioRecorder {}
 
@@ -80,6 +139,7 @@ impl AudioRecorder {
             active: Mutex::new(None),
             start_instant: Mutex::new(None),
             audio_started: Arc::new(AtomicBool::new(false)),
+            level: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -94,6 +154,13 @@ impl AudioRecorder {
     /// 本次录音是否已收到首个音频回调（即设备真正开始采集）。
     pub fn audio_started(&self) -> bool {
         self.audio_started.load(Ordering::SeqCst)
+    }
+
+    /// 取走自上次调用以来的峰值 RMS，并清零。
+    /// 清零是有意的：设备不再回调时这里就返回 0，波形会掉成平线，
+    /// 而不是把最后一个值永久定在屏幕上假装还有声音。
+    pub fn take_level(&self) -> f32 {
+        f32::from_bits(self.level.swap(0, Ordering::Relaxed))
     }
 
     /// 开始录音。`live_tx` 不为 `None` 时，每个音频回调都会把原始帧同时送进
@@ -121,18 +188,23 @@ impl AudioRecorder {
 
         let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         self.audio_started.store(false, Ordering::SeqCst);
+        self.level.store(0, Ordering::Relaxed);
 
         let stream = match sample_format {
             SampleFormat::F32 => {
                 let sc = Arc::clone(&samples);
                 let started = Arc::clone(&self.audio_started);
+                let level = Arc::clone(&self.level);
                 let tx = live_tx.clone();
                 device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if !started.load(Ordering::Relaxed) && rms(data) > READY_RMS_THRESHOLD {
+                        // 每帧只算一次 RMS，就绪判定与波形电平共用。
+                        let r = rms(data);
+                        if !started.load(Ordering::Relaxed) && r > READY_RMS_THRESHOLD {
                             started.store(true, Ordering::SeqCst);
                         }
+                        publish_level(&level, r);
                         // 用 lock 而不是 try_lock：try_lock 在锁竞争时会静默丢掉整帧。
                         // stop() 是先停流再取锁的，这里实际不存在竞争。
                         sc.lock()
@@ -154,6 +226,7 @@ impl AudioRecorder {
             SampleFormat::I16 => {
                 let sc = Arc::clone(&samples);
                 let started = Arc::clone(&self.audio_started);
+                let level = Arc::clone(&self.level);
                 let tx = live_tx.clone();
                 device.build_input_stream(
                     &config,
@@ -161,9 +234,11 @@ impl AudioRecorder {
                         // 只转一次浮点，整段缓冲与实时通道共用。
                         let frame: Vec<f32> =
                             data.iter().map(|&s| s as f32 / 32768.0).collect();
-                        if !started.load(Ordering::Relaxed) && rms(&frame) > READY_RMS_THRESHOLD {
+                        let r = rms(&frame);
+                        if !started.load(Ordering::Relaxed) && r > READY_RMS_THRESHOLD {
                             started.store(true, Ordering::SeqCst);
                         }
+                        publish_level(&level, r);
                         sc.lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .extend_from_slice(&frame);
@@ -213,6 +288,7 @@ impl AudioRecorder {
             // which releases the microphone and clears the macOS orange indicator.
             let _ = recording.stream.pause();
             drop(recording.stream);
+            self.level.store(0, Ordering::Relaxed);
 
             let mut samples = recording.samples.lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -264,6 +340,7 @@ impl AudioRecorder {
             let _ = recording.stream.pause();
             drop(recording.stream);
         }
+        self.level.store(0, Ordering::Relaxed);
 
         *state = RecordingState::Idle;
         *self.start_instant.lock().unwrap() = None;
@@ -321,5 +398,103 @@ mod tests {
     fn test_cancel_when_not_recording_returns_error() {
         let recorder = AudioRecorder::new();
         assert!(recorder.cancel().is_err());
+    }
+
+    /// dBFS → 线性 RMS，方便按分贝写断言。
+    fn from_db(db: f32) -> f32 {
+        10f32.powf(db / 20.0)
+    }
+
+    #[test]
+    fn level_is_zero_for_silence_and_room_noise() {
+        assert_eq!(level_from_rms(0.0), 0.0);
+        assert_eq!(level_from_rms(1e-7), 0.0);
+        // 地板以下与噪声门以内都必须是精确的 0，静音才会是一条平线。
+        // 安静房间实测在 -65..-52 dBFS 这一段。
+        assert_eq!(level_from_rms(from_db(-60.0)), 0.0);
+        assert_eq!(level_from_rms(from_db(-52.0)), 0.0);
+        assert_eq!(level_from_rms(from_db(-50.0)), 0.0);
+        // 门限边界之上一点（风扇级底噪）不归零，但高度要小到和基线一样粗：
+        // 0.06 × 20px 画布 ≈ 1px。
+        assert!(level_from_rms(from_db(-48.0)) < 0.06);
+    }
+
+    #[test]
+    fn level_puts_normal_speech_mid_height() {
+        // 正常说话约 -26 dBFS，应该落在中间高度附近，而不是贴顶或贴底
+        let mid = level_from_rms(from_db(-26.0));
+        assert!(
+            (0.40..=0.65).contains(&mid),
+            "normal speech mapped to {mid}"
+        );
+        // 大声与满量程都到顶，且不越界
+        assert_eq!(level_from_rms(from_db(-12.0)), 1.0);
+        assert_eq!(level_from_rms(1.0), 1.0);
+    }
+
+    #[test]
+    fn level_is_monotonic_and_bounded() {
+        let mut prev = 0.0;
+        for db in [-50, -45, -40, -32, -26, -22, -18, -15, -12] {
+            let v = level_from_rms(from_db(db as f32));
+            assert!((0.0..=1.0).contains(&v), "{db} dBFS → {v}");
+            assert!(v >= prev, "not monotonic at {db} dBFS: {prev} → {v}");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn level_rejects_non_finite_input() {
+        assert_eq!(level_from_rms(f32::NAN), 0.0);
+        assert_eq!(level_from_rms(f32::INFINITY), 0.0);
+        assert_eq!(level_from_rms(f32::NEG_INFINITY), 0.0);
+        assert_eq!(level_from_rms(-1.0), 0.0);
+    }
+
+    #[test]
+    fn smooth_rises_faster_than_it_falls() {
+        let up = smooth(0.0, 1.0);
+        let down = smooth(1.0, 0.0);
+        assert!(up > 0.5, "attack too slow: {up}");
+        assert!(down > 0.5, "release too fast: {down}");
+        assert!(up > 1.0 - down, "attack should outpace release");
+    }
+
+    #[test]
+    fn smooth_converges_and_stays_bounded() {
+        let mut v = 0.0;
+        for _ in 0..20 {
+            v = smooth(v, 1.0);
+            assert!((0.0..=1.0).contains(&v));
+        }
+        assert!(v > 0.99, "did not converge up: {v}");
+        for _ in 0..40 {
+            v = smooth(v, 0.0);
+        }
+        assert!(v < 0.01, "did not converge down: {v}");
+        assert_eq!(smooth(f32::NAN, 0.5), 0.0);
+    }
+
+    #[test]
+    fn publish_level_keeps_peak_and_rejects_non_finite() {
+        let cell = AtomicU32::new(0);
+        publish_level(&cell, 0.01);
+        publish_level(&cell, 0.05);
+        publish_level(&cell, 0.02); // 峰值不应被较小值盖掉
+        assert_eq!(f32::from_bits(cell.load(Ordering::Relaxed)), 0.05);
+        // NaN / inf 的 bit 模式大于任何有限正浮点，必须挡在门外
+        publish_level(&cell, f32::NAN);
+        publish_level(&cell, f32::INFINITY);
+        assert_eq!(f32::from_bits(cell.load(Ordering::Relaxed)), 0.05);
+    }
+
+    #[test]
+    fn take_level_clears_so_a_dead_mic_reads_zero() {
+        let recorder = AudioRecorder::new();
+        assert_eq!(recorder.take_level(), 0.0);
+        publish_level(&recorder.level, 0.2);
+        assert_eq!(recorder.take_level(), 0.2);
+        // 设备不再回调后，后续读取应当是 0 而不是停在上一个值
+        assert_eq!(recorder.take_level(), 0.0);
     }
 }

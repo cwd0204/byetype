@@ -17,6 +17,9 @@ const READY_POLL_INTERVAL_MS: u64 = 20;
 /// 等待首帧音频的最大轮询次数（20ms × 150 = 3 秒兜底）。
 const READY_POLL_TICKS: u32 = 150;
 
+/// 气泡波形每拍的间隔。25 Hz 正好对应波形上的一列。
+const LEVEL_TICK_MS: u64 = 40;
+
 /// 当前录音对应的流式转写会话。每个停止点都要取走它：不取走只是丢掉加速
 /// （`LiveTranscribe` 自己的看门狗会收尾），但拿不到已经识别好的文字。
 type CurrentLive = Arc<Mutex<Option<LiveTranscribe>>>;
@@ -288,6 +291,42 @@ fn handle_ptt_event(
     }
 }
 
+/// 录音期间把麦克风电平推给气泡，驱动波形动画。
+///
+/// 为什么是 Rust 主动推而不是前端轮询：停止录音的权威状态是 `recording_gen`，每条
+/// 停止路径都会 CAS 递增它，所以这里一句世代校验就能干净退出；而 requestAnimationFrame
+/// 在隐藏或被遮挡的窗口里不执行，气泡平时正是 hide 且停在屏幕外，前端循环没法当活性依据。
+fn spawn_level_pump(
+    app: &AppHandle,
+    recorder: &Arc<AudioRecorder>,
+    recording_gen: &Arc<AtomicU32>,
+    gen: u32,
+    task_id: u32,
+) {
+    let app = app.clone();
+    let recorder = recorder.clone();
+    let gen_src = recording_gen.clone();
+    let label = crate::bubble::label_for(task_id);
+    std::thread::spawn(move || {
+        let mut disp = 0f32;
+        loop {
+            if gen_src.load(Ordering::SeqCst) != gen {
+                return; // 录音已结束
+            }
+            let target = crate::audio::recorder::level_from_rms(recorder.take_level());
+            disp = crate::audio::recorder::smooth(disp, target);
+            // 带上 taskNumber：label_for 把 task_id 钳到 MAX_BUBBLES，第 4 个任务会复用
+            // bubble-3，前端据此丢弃不属于当前任务的电平。
+            let _ = app.emit_to(
+                &label,
+                "bubble-level",
+                serde_json::json!({ "taskNumber": task_id, "level": disp }),
+            );
+            std::thread::sleep(Duration::from_millis(LEVEL_TICK_MS));
+        }
+    });
+}
+
 /// 丢弃一次不该转写的录音（PTT 按得太短，或单独修饰键按住期间夹了别的键）：
 /// 取消采集与流式会话、还原托盘图标、释放任务槽位。
 fn discard_recording(
@@ -377,6 +416,9 @@ fn start_voice_recording(
                         return;
                     }
                     let _ = crate::bubble::update(&w_app, tid, "recording");
+                    // 波形要在 open_live_stream 之前开：PTT 模式下那个函数会阻塞到
+                    // PTT_MIN_DURATION_MS，放在它后面的话每次按住说话的头 300ms 波形是平的。
+                    spawn_level_pump(&w_app, &w_recorder, &w_gen, gen, tid);
                     if let Some((tx, rx)) = feed {
                         open_live_stream(&w_app, &w_recorder, &w_live, &w_gen, gen, ptt, tx, rx);
                     }
