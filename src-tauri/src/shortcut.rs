@@ -60,13 +60,25 @@ pub fn register(
     // Voice shortcut 1
     if !cfg.general.shortcut.is_empty() {
         let key = &cfg.general.shortcut;
-        let handler = voice_handler(app, cfg.general.shortcut_template.clone(), recorder.clone(), fires_on_release(key));
+        let handler = voice_handler(
+            app,
+            cfg.general.shortcut_template.clone(),
+            cfg.general.shortcut_transcribe_model.clone(),
+            recorder.clone(),
+            fires_on_release(key),
+        );
         bind(app, key, "voice", handler, &mut modifier_bindings)?;
     }
     // Voice shortcut 2
     if !cfg.general.shortcut2.is_empty() {
         let key = &cfg.general.shortcut2;
-        let handler = voice_handler(app, cfg.general.shortcut2_template.clone(), recorder.clone(), fires_on_release(key));
+        let handler = voice_handler(
+            app,
+            cfg.general.shortcut2_template.clone(),
+            cfg.general.shortcut2_transcribe_model.clone(),
+            recorder.clone(),
+            fires_on_release(key),
+        );
         bind(app, key, "voice", handler, &mut modifier_bindings)?;
     }
     // Image shortcut 1 (ek1 with fallback already computed above for conflict detection)
@@ -128,11 +140,13 @@ fn bind(
 fn voice_handler(
     app: &AppHandle,
     template_id: String,
+    engine_id: String,
     recorder: Arc<AudioRecorder>,
     fires_on_release: bool,
 ) -> Handler {
     let app_handle = app.clone();
     let tmpl = template_id;
+    let engine = engine_id;
     // Track the current recording's task_id between start and stop
     let current_task_id: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
     let current_live: CurrentLive = Arc::new(Mutex::new(None));
@@ -150,6 +164,7 @@ fn voice_handler(
                 &current_live,
                 &recording_gen,
                 &tmpl,
+                &engine,
             );
         } else {
             handle_toggle_event(
@@ -161,6 +176,7 @@ fn voice_handler(
                 &current_live,
                 &recording_gen,
                 &tmpl,
+                &engine,
             );
         }
     })
@@ -178,6 +194,7 @@ fn handle_toggle_event(
     current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
+    engine: &str,
 ) {
     let trigger = if fires_on_release {
         HotkeyEvent::Released
@@ -204,7 +221,14 @@ fn handle_toggle_event(
             Ok(base64_audio) => {
                 update_tray_icon(app_handle, false);
                 if let Some(tid) = task_id {
-                    crate::task::process_recording(app_handle, tid, base64_audio, tmpl.to_string(), live);
+                    crate::task::process_recording(
+                        app_handle,
+                        tid,
+                        base64_audio,
+                        tmpl.to_string(),
+                        engine.to_string(),
+                        live,
+                    );
                 }
             }
             Err(e) => {
@@ -219,7 +243,7 @@ fn handle_toggle_event(
             }
         }
     } else {
-        start_voice_recording(app_handle, recorder, current_task_id, current_live, recording_gen, tmpl, false);
+        start_voice_recording(app_handle, recorder, current_task_id, current_live, recording_gen, tmpl, engine, false);
     }
 }
 
@@ -233,6 +257,7 @@ fn handle_ptt_event(
     current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
+    engine: &str,
 ) {
     match event {
         HotkeyEvent::Pressed => {
@@ -240,7 +265,7 @@ fn handle_ptt_event(
             if recorder.is_recording() {
                 return;
             }
-            start_voice_recording(app_handle, recorder, current_task_id, current_live, recording_gen, tmpl, true);
+            start_voice_recording(app_handle, recorder, current_task_id, current_live, recording_gen, tmpl, engine, true);
         }
         HotkeyEvent::Cancelled => {
             // CAS: race against auto-timeout timer.
@@ -272,7 +297,14 @@ fn handle_ptt_event(
                     Ok(base64_audio) => {
                         update_tray_icon(app_handle, false);
                         if let Some(tid) = task_id {
-                            crate::task::process_recording(app_handle, tid, base64_audio, tmpl.to_string(), live);
+                            crate::task::process_recording(
+                        app_handle,
+                        tid,
+                        base64_audio,
+                        tmpl.to_string(),
+                        engine.to_string(),
+                        live,
+                    );
                         }
                     }
                     Err(e) => {
@@ -356,6 +388,7 @@ fn start_voice_recording(
     current_live: &CurrentLive,
     recording_gen: &Arc<AtomicU32>,
     tmpl: &str,
+    engine: &str,
     ptt: bool,
 ) {
     // Allocate the new generation BEFORE starting the recorder, so that any
@@ -384,8 +417,13 @@ fn start_voice_recording(
     // 边说边转写：录音一开始就把音频帧往 channel 里送，但流要等麦克风真的
     // 出声了才开（见下面的就绪线程）。这段时间的帧在 channel 里排着，开流时
     // 一次补发，开头不会丢字。协议不支持流式的转写模型直接不开这条路。
-    let feed = crate::ai::live_transcribe_supported(&app_handle.state::<ConfigManager>().get())
-        .then(tokio::sync::mpsc::unbounded_channel::<LiveAudio>);
+    // 只有 Amazon Transcribe 有流式通道；Voxtral 那条路要录完整段再传，不开流。
+    let feed = {
+        let cfg = app_handle.state::<ConfigManager>().get();
+        let model = crate::ai::models::effective_transcribe_model(&cfg, engine);
+        crate::ai::live_transcribe_supported(&cfg, &model)
+            .then(tokio::sync::mpsc::unbounded_channel::<LiveAudio>)
+    };
     let live_tx = feed.as_ref().map(|(tx, _)| tx.clone());
 
     match recorder.start(&mic, live_tx) {
@@ -433,6 +471,7 @@ fn start_voice_recording(
                 let t_live = current_live.clone();
                 let t_gen = recording_gen.clone();
                 let t_tmpl = tmpl.to_string();
+                let t_engine = engine.to_string();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(max_secs as u64));
                     if t_gen.compare_exchange(gen, gen + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
@@ -444,7 +483,14 @@ fn start_voice_recording(
                             Ok(base64_audio) => {
                                 update_tray_icon(&t_app, false);
                                 if let Some(tid) = task_id {
-                                    crate::task::process_recording(&t_app, tid, base64_audio, t_tmpl.clone(), live);
+                                    crate::task::process_recording(
+                                        &t_app,
+                                        tid,
+                                        base64_audio,
+                                        t_tmpl.clone(),
+                                        t_engine.clone(),
+                                        live,
+                                    );
                                 }
                             }
                             Err(e) => {

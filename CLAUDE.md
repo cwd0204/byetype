@@ -75,11 +75,15 @@ shortcut.rs  全局快捷键（2 个语音 + 2 个图像，各绑一个 template
 
 ### AI 层（`src-tauri/src/ai/`）
 
-- **只有 AWS 两个协议**（本分支已删除 Gemini / 千问 / MiMo / OpenRouter / DeepSeek）：`aws-transcribe` → `transcribe_aws.rs`（流式 ASR，只做音频）；`bedrock` → `bedrock.rs`（Converse API，只做文本 / 图像）。`mod.rs` 里 `transcribe_audio` 要求音频模型是 Transcribe，`extract_text` / `run_text`（被 `optimize` / `complete_text` / `analyze_correction` 共用）要求文本模型是 Bedrock，成功后 `record_usage`
-- `models.rs` 的 `BUILTIN_MODELS`（3 个 Claude `builtin-bedrock-*` + `builtin-aws-transcribe`）与 `src/core/models.ts` 的 `BUILTIN_MODELS` 是**两份手动镜像**，必须同步改；`DEFAULT_TRANSCRIBE_MODEL` / `DEFAULT_TEXT_MODEL` 两个常量是新装默认与迁移兜底。自定义模型只允许 `protocol = bedrock`（填任意模型 / 推理配置 id）
+- **只有 AWS 两个协议**（本分支已删除 Gemini / 千问 / MiMo / OpenRouter / DeepSeek）：`aws-transcribe` → `transcribe_aws.rs`（流式 ASR，只做音频）；`bedrock` → `bedrock.rs`（Converse API，做文本 / 图像，另有 Voxtral 做音频）
+- **协议不等于能力**：`builtin-bedrock-voxtral`（`mistral.voxtral-small-24b-2507`）协议是 `bedrock` 但只吃音频，是「高准确度」转写引擎，所以判断能力要看 `ResolvedModel.supports_audio` 而不是协议。它不支持流式输入（录完整段再传），只接受 wav / mp3（内部 FLAC 要先解成 WAV），指令只能放 user 文本块（system 块被拒），**必须显式传 temperature=0**，否则同一段音频每次结果都不同。产出要过 `transcript_defect` 校验（长度、markdown 结构、结尾重复），不像转写稿就自动回落 Amazon Transcribe —— 对着静音它会吐上万字
+- 两个语音快捷键可以各选引擎：`general.shortcut_transcribe_model` / `shortcut2_transcribe_model`，空 = 跟随「转写设置」，语义同 `meeting.transcribe_model_id`。引擎烘在快捷键 handler 里（决定是否开流式通道），所以 `save_config` 的重注册条件里包含这两个字段
+- `mod.rs` 里 `transcribe_audio` 按 `supports_audio` 分派到两条音频通道；`extract_text` / `run_text`（被 `optimize` / `complete_text` / `analyze_correction` 共用）要求文本模型是 Bedrock **且不是音频模型**，成功后 `record_usage`
+- `models.rs` 的 `BUILTIN_MODELS`（3 个 Claude `builtin-bedrock-*` + `builtin-aws-transcribe` + `builtin-bedrock-voxtral`）与 `src/core/models.ts` 的 `BUILTIN_MODELS` 是**两份手动镜像**，必须同步改；`DEFAULT_TRANSCRIBE_MODEL` / `DEFAULT_TEXT_MODEL` 两个常量是新装默认与迁移兜底。自定义模型只允许 `protocol = bedrock`（填任意模型 / 推理配置 id）
 - **不用 API Key**：凭证走 `aws.rs` 的 SDK 默认凭证链（`~/.aws/config` 的 profile，ADA `credential_process` / 静态 key / SSO 都行），配置只有 `models.aws` 里的 profile + region（Bedrock 与 Transcribe 分开，因为同一角色可能只授权其一）。SDK 错误统一经 `aws::map_sdk_error` 转成 `"<Label> API error (<status>): ..."` 以配合 `retry.rs`；SDK 不走 `advanced.proxy_*`（字段与 `build_client` 管道保留但 UI 已移除）
 - Transcribe 多语言识别只收 PCM，`transcribe_aws.rs` 先用 `audio::input::decode_to_pcm16` 解码内部 FLAC；Claude 5 系列思考用 `adaptive` + `output_config.effort`，4.5 及更早用 `enabled` + `budget_tokens`，`bedrock.rs` 按模型名猜、被拒后换另一种重试
-- Amazon Transcribe 吃不到提示词，所以 `prompt.rs` 的 `build_optimize_prompt` 在转写模型是它时强制带上 rules / vocabulary / voice-learning（`models::transcribe_needs_post_correction`）；`build_transcribe_prompt` 暂时闲置（`#[allow(dead_code)]`）
+- 两个转写引擎都吃不到 rules / vocabulary / voice-learning（Transcribe 不接受提示词，Voxtral 塞了文档会跑偏），所以 `prompt.rs` 的 `build_optimize_prompt` 一律在优化阶段强制带上它们（`models::transcribe_needs_post_correction`，按 `supports_audio` 判断，参数是**本次实际使用的引擎**而不是全局设置）；`build_transcribe_prompt` 仍然闲置（`#[allow(dead_code)]`）
+- **本机 `prompts/vocabulary.md` 要真的填词**：`is_skeleton_only` 会跳过只有空章节的文档，词汇表为空时这条后校正链路等于空转
 - `config/migration.rs` 末尾的 `migrate_to_aws_only` 把旧配置里所有非 AWS 模型 id 收口到默认值、丢弃 `builtinApiKeys` 与非 Bedrock 自定义模型、抬高超时、把 `MINIMAL` 思考档并入 `LOW`
 - 真机联调测试带 `#[ignore]`：`cargo test --lib live_ -- --ignored --nocapture`（需要本机 AWS 凭证与 `/tmp/byetype-test-zh.wav` 样本，生成方法见 `transcribe_aws.rs` 测试注释）
 - `transport.rs` 是 OpenAI 兼容请求的公共通道；`retry.rs` 的 `with_retry` 靠解析错误字串里的 `(<status>)` 判断 4xx 不重试（408 / 429 除外），所以各 provider 的错误必须保持 `"<Provider> API error (<status>): <body>"` 格式

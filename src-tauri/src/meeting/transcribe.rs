@@ -27,6 +27,8 @@ pub async fn transcribe_chunk(config: &AppConfig, chunk: &ReadyChunk) -> Result<
         TranscribeOptions {
             speaker_labels: true,
         },
+        // 会议走 Amazon Transcribe，用不到 Voxtral 的术语提示
+        None,
     )
     .await
     .map(|output| output.text)

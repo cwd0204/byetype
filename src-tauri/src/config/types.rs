@@ -224,6 +224,12 @@ pub struct GeneralConfig {
     pub extract_shortcut_template: String,
     #[serde(default)]
     pub extract_shortcut2_template: String,
+    /// 两个语音快捷键各自的转写引擎；空 = 跟随「转写设置」里的转写模型。
+    /// 语义与 `meeting.transcribe_model_id` 一致。
+    #[serde(default)]
+    pub shortcut_transcribe_model: String,
+    #[serde(default)]
+    pub shortcut2_transcribe_model: String,
     #[serde(default)]
     pub shortcut_label: Option<String>,
     #[serde(default)]
@@ -482,6 +488,9 @@ impl Default for AppConfig {
                 shortcut2_template: "voice-translate".to_string(),
                 extract_shortcut_template: "image-extract".to_string(),
                 extract_shortcut2_template: "image-translate".to_string(),
+                // 默认两个语音快捷键都跟随「转写设置」
+                shortcut_transcribe_model: String::new(),
+                shortcut2_transcribe_model: String::new(),
                 shortcut_label: None,
                 shortcut2_label: None,
                 extract_shortcut_label: None,

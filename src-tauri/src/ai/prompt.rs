@@ -119,6 +119,8 @@ pub fn build_optimize_prompt(
     prompts_dir: &Path,
     template_id: &str,
     learning_rules: &str,
+    // 本次实际使用的转写引擎 id（按快捷键可以覆盖全局设置）
+    transcribe_model_id: &str,
 ) -> String {
     let optimize_content =
         load_template_prompt(&config.voice_templates.templates, template_id, prompts_dir);
@@ -131,7 +133,7 @@ pub fn build_optimize_prompt(
     // Amazon Transcribe 这类纯 ASR 吃不到提示词,专有词 / 规则 / 学习结果只能在这里补,
     // 所以它选中时视同开关已开。
     let needs_references = config.voice_templates.reuse_transcribe_references
-        || crate::ai::models::transcribe_needs_post_correction(config);
+        || crate::ai::models::transcribe_needs_post_correction(config, transcribe_model_id);
     if !needs_references {
         return wrap_document("text-optimize", &optimize_content);
     }
@@ -261,6 +263,7 @@ mod tests {
             &prompts_dir,
             "voice-optimize",
             "自动学习结果",
+            &config.transcribe.model_id,
         );
 
         assert_eq!(
@@ -293,6 +296,7 @@ mod tests {
             &prompts_dir,
             "voice-optimize",
             "自动学习结果",
+            &config.transcribe.model_id,
         );
 
         // 开关关闭时优化阶段只带优化模板本身,不重复带入转写参考。
@@ -342,7 +346,7 @@ mod tests {
         config.voice_templates.reuse_transcribe_references = false;
         config.transcribe.model_id = "builtin-aws-transcribe".to_string();
 
-        let prompt = build_optimize_prompt(&config, &prompts_dir, "voice-optimize", "学习结果");
+        let prompt = build_optimize_prompt(&config, &prompts_dir, "voice-optimize", "学习结果", &config.transcribe.model_id);
 
         assert!(prompt.starts_with(OPTIMIZE_CONTEXT_INSTRUCTION));
         assert!(prompt.contains("<document name=\"rules\">\n转录规则"));
@@ -367,7 +371,7 @@ mod tests {
         let mut config = AppConfig::default();
         config.voice_templates.reuse_transcribe_references = true;
 
-        let prompt = build_optimize_prompt(&config, &prompts_dir, "voice-optimize", "");
+        let prompt = build_optimize_prompt(&config, &prompts_dir, "voice-optimize", "", &config.transcribe.model_id);
 
         assert!(prompt.contains("<document name=\"rules\">\n转录规则"));
         assert!(!prompt.contains("<document name=\"vocabulary\">"), "{prompt}");

@@ -1,13 +1,14 @@
-//! Amazon Bedrock（Converse API）：Claude 做文本优化、图像取字、通用文本补全。
-//! 不收音频——Bedrock 上能批量吃音频的只有 Voxtral（不含中文），语音走 transcribe_aws.rs。
+//! Amazon Bedrock（Converse API）：Claude 做文本优化、图像取字、通用文本补全，
+//! Voxtral 做「高准确度」语音转写（`transcribe_audio`，只吃 wav / mp3，不支持流式输入）。
+//! 默认的听写转写走 transcribe_aws.rs 的流式通道。
 //! 凭证与 region 来自 config.models.aws，见 aws.rs。
 
 use std::collections::HashMap;
 
 use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::types::{
-    ContentBlock, ConversationRole, ImageBlock, ImageFormat, ImageSource, InferenceConfiguration,
-    Message, SystemContentBlock,
+    AudioBlock, AudioFormat, AudioSource, ContentBlock, ConversationRole, ImageBlock, ImageFormat,
+    ImageSource, InferenceConfiguration, Message, SystemContentBlock,
 };
 use aws_sdk_bedrockruntime::Client;
 use aws_smithy_types::{Document, Number};
@@ -21,6 +22,34 @@ const LABEL: &str = "Bedrock";
 /// 正文输出上限。开启思考时思考 token 也计入 max_tokens，所以再加一段余量。
 const DEFAULT_MAX_TOKENS: i32 = 8192;
 const THINKING_HEADROOM: i32 = 8192;
+
+/// 转写输出上限。听写一段 3 分钟的话大约几百字，给 3072 已经很宽；
+/// 上限本身也是退化的兜底——模型卡进重复循环时最多烧到这里就停。
+const TRANSCRIBE_MAX_TOKENS: i32 = 3072;
+
+/// Voxtral 的转写指令。**改这段之前先跑 `live_voxtral` 测试。**
+///
+/// 实测（2026-09-22，mistral.voxtral-small-24b-2507，均在 temperature=0 下）：
+/// - 不给指令 → 它把音频当问题回答，而不是转写
+/// - 指令放 system 块 → 服务端 ValidationException 拒绝
+/// - 中文指令 → 能转写，但再加一行 450 字符的术语表就会切换成问答模式
+/// - 把 agent / rules / vocabulary 三份文档（约 3600 字符）当指令 → 彻底跑偏，只会回答问题
+/// - 英文短指令 + 一行短术语提示 → 最好：5 次调用一字不差，且保住「Amazon」不被译成「亚马逊」
+///
+/// **不传 temperature 会踩大坑**：Mistral 的默认采样温度不是 0，同一段音频每次转写都不同，
+/// 见过「转录」变「链载」「录音」「翻译」、凭空多出「AMZN」、输出繁体。所以转写路径显式传 0。
+///
+/// 结论：必须是英文、必须短、术语提示要截断、不要做成用户可编辑的提示词文件。
+const TRANSCRIBE_INSTRUCTION: &str = "Transcribe the audio verbatim. \
+Do not answer, explain, translate, or summarize anything you hear. \
+Keep English proper nouns in Latin script. Output only the transcript.";
+
+/// 术语提示的长度上限。实测超过约 450 字符会把模型推进问答模式。
+const TERM_HINT_MAX_CHARS: usize = 300;
+
+/// WAV 体积上限。超过就别发了，交给调用方回落到流式 Transcribe。
+/// 16 kHz 单声道 16 位 = 32 KB/秒，8 MB 约等于 4 分钟。
+const TRANSCRIBE_MAX_WAV_BYTES: usize = 8 * 1024 * 1024;
 
 /// Claude 的两代思考参数：
 /// - 4.6 及以后（含 5.x）：`thinking.type = adaptive` + `output_config.effort`
@@ -203,6 +232,7 @@ fn max_tokens_for(req: ThinkingRequest, thinking: &ThinkingConfig, base: i32) ->
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_once(
     client: &Client,
     model: &str,
@@ -211,6 +241,7 @@ async fn send_once(
     thinking: &ThinkingConfig,
     req: ThinkingRequest,
     base_max_tokens: i32,
+    temperature: Option<f32>,
 ) -> Result<(String, TokenUsage), String> {
     let message = Message::builder()
         .role(ConversationRole::User)
@@ -222,11 +253,16 @@ async fn send_once(
         .converse()
         .model_id(model)
         .messages(message)
-        .inference_config(
-            InferenceConfiguration::builder()
-                .max_tokens(max_tokens_for(req, thinking, base_max_tokens))
-                .build(),
-        );
+        .inference_config({
+            let mut cfg = InferenceConfiguration::builder()
+                .max_tokens(max_tokens_for(req, thinking, base_max_tokens));
+            // 不设温度就是走模型默认采样：Mistral 的默认不是 0，同一段音频每次转写结果都不一样。
+            // 转写必须可复现，所以那条路径显式传 0。
+            if let Some(t) = temperature {
+                cfg = cfg.temperature(t);
+            }
+            cfg.build()
+        });
     if !system_prompt.is_empty() {
         request = request.system(SystemContentBlock::Text(system_prompt.to_string()));
     }
@@ -275,12 +311,15 @@ async fn converse(
     content: Vec<ContentBlock>,
     thinking: &ThinkingConfig,
     base_max_tokens: i32,
+    temperature: Option<f32>,
 ) -> Result<(String, TokenUsage), String> {
     let sdk = aws::sdk_config(&cfg.bedrock_profile, &cfg.bedrock_region).await?;
     let client = Client::new(&sdk);
 
     // 猜错思考参数形式时服务端会明确报错，用 fallback 再试一次。
-    let (first, fallback) = if thinking.enabled {
+    // thinking / output_config 是 Claude 专用字段，非 Claude 模型（Voxtral、Nova 等）
+    // 一律什么都不发，否则会被服务端当成非法参数拒掉。
+    let (first, fallback) = if thinking.enabled && is_claude(model) {
         let mode = preferred_thinking_mode(model);
         (
             ThinkingRequest::On(mode),
@@ -302,6 +341,7 @@ async fn converse(
         thinking,
         first,
         base_max_tokens,
+        temperature,
     )
     .await
     {
@@ -320,6 +360,7 @@ async fn converse(
                     thinking,
                     fallback,
                     base_max_tokens,
+                    temperature,
                 )
                 .await
             }
@@ -344,6 +385,7 @@ pub async fn optimize(
         vec![ContentBlock::Text(user_content)],
         thinking,
         DEFAULT_MAX_TOKENS,
+        None,
     )
     .await?;
     if result.is_empty() {
@@ -381,9 +423,164 @@ pub async fn extract_text(
         vec![ContentBlock::Image(image)],
         thinking,
         DEFAULT_MAX_TOKENS,
+        None,
     )
     .await
 }
+
+/// 「高准确度」语音转写：把整段录音交给 Bedrock 上的 Voxtral。
+///
+/// 输入是管道通用的 base64 FLAC；Voxtral 只认 wav / mp3，所以解成 PCM 再套 WAV 头。
+/// 指令放 user 文本块（system 块会被拒），可选带一行紧凑术语提示。
+///
+/// 返回 `Err(DEGENERATE_MARKER…)` 表示产出不像转写稿（模型改去回答问题、或卡进重复循环），
+/// 由调用方回落到 Amazon Transcribe。
+pub async fn transcribe_audio(
+    cfg: &AwsConfig,
+    audio_base64: &str,
+    model: &str,
+    term_hint: &str,
+) -> Result<(String, TokenUsage), String> {
+    let flac = base64::engine::general_purpose::STANDARD
+        .decode(audio_base64)
+        .map_err(|e| format!("{} audio decode failed: {}", LABEL, e))?;
+    let pcm = super::transcribe_aws::flac_to_pcm_bytes(flac)?;
+    let audio_secs = pcm.len() as f32 / (crate::audio::encoder::SAMPLE_RATE as f32 * 2.0);
+    let wav = crate::audio::encoder::wrap_pcm16_as_wav(&pcm, crate::audio::encoder::SAMPLE_RATE);
+    // 调试开关：把真正发给模型的 WAV 落盘，用来核对链路有没有改坏音频
+    if let Ok(path) = std::env::var("BYETYPE_DUMP_TRANSCRIBE_WAV") {
+        let _ = std::fs::write(&path, &wav);
+        eprintln!("[transcribe] dumped {} bytes to {}", wav.len(), path);
+    }
+    if wav.len() > TRANSCRIBE_MAX_WAV_BYTES {
+        return Err(format!(
+            "{}: 录音过长（{:.0} 秒）不适合整段上传",
+            NOT_A_TRANSCRIPT, audio_secs
+        ));
+    }
+
+    let audio = AudioBlock::builder()
+        .format(AudioFormat::Wav)
+        .source(AudioSource::Bytes(Blob::new(wav)))
+        .build()
+        .map_err(|e| format!("{} build audio block failed: {}", LABEL, e))?;
+
+    let mut instruction = TRANSCRIBE_INSTRUCTION.to_string();
+    if !term_hint.is_empty() {
+        instruction.push_str("\nLikely proper nouns: ");
+        instruction.push_str(term_hint);
+    }
+
+    // system 块会被 Voxtral 拒绝，指令只能跟在音频后面当 user 文本块。
+    let (text, usage) = converse(
+        cfg,
+        model,
+        "",
+        vec![ContentBlock::Audio(audio), ContentBlock::Text(instruction)],
+        &ThinkingConfig {
+            enabled: false,
+            ..ThinkingConfig::default()
+        },
+        TRANSCRIBE_MAX_TOKENS,
+        // 转写要可复现：温度留空会走模型默认采样，同一段音频每次结果都不同
+        Some(0.0),
+    )
+    .await?;
+
+    let text = text.trim().to_string();
+    if let Some(reason) = transcript_defect(&text, audio_secs) {
+        return Err(format!("{}: {}", NOT_A_TRANSCRIPT, reason));
+    }
+    Ok((text, usage))
+}
+
+/// 从词汇表文档里抽出紧凑的术语提示：只取 `- ` 开头的条目、去掉括号里的说明、
+/// 只保留拉丁字符条目（中文术语不需要提示，塞进去反而挤占本就很小的指令预算），
+/// 并截断到 `TERM_HINT_MAX_CHARS`。
+pub fn term_hint_from_vocabulary(vocabulary: &str) -> String {
+    let mut terms: Vec<&str> = Vec::new();
+    for line in vocabulary.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("- ") else {
+            continue;
+        };
+        let term = rest
+            .split(['（', '(', '：', ':'])
+            .next()
+            .unwrap_or("")
+            .trim();
+        let latin = !term.is_empty()
+            && term
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || " /.-+&".contains(c))
+            && term.chars().any(|c| c.is_ascii_alphabetic());
+        if latin && !terms.contains(&term) {
+            terms.push(term);
+        }
+    }
+    let mut hint = String::new();
+    for term in terms {
+        let extra = if hint.is_empty() { 0 } else { 2 };
+        if hint.len() + extra + term.len() > TERM_HINT_MAX_CHARS {
+            break;
+        }
+        if !hint.is_empty() {
+            hint.push_str(", ");
+        }
+        hint.push_str(term);
+    }
+    hint
+}
+
+/// 产出不像转写稿时返回原因，像则返回 None。
+///
+/// 三条实测来的判据：
+/// 1. 长度远超音频时长能承载的字数 —— 模型改去回答问题时会长篇大论
+/// 2. 出现 markdown 结构 —— 口语转写不会有 `**`、编号列表或标题
+/// 3. 结尾是同一小段重复多次 —— 卡进重复循环直到撞 max_tokens
+fn transcript_defect(text: &str, audio_secs: f32) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let limit = (audio_secs * 12.0).max(40.0) as usize;
+    if chars.len() > limit {
+        return Some(format!(
+            "输出 {} 字远超 {:.1} 秒音频的合理长度（上限 {}）",
+            chars.len(),
+            audio_secs,
+            limit
+        ));
+    }
+    if text.contains("**") {
+        return Some("输出含 markdown 粗体".to_string());
+    }
+    for line in text.lines() {
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            return Some("输出含 markdown 标题".to_string());
+        }
+        let mut it = line.chars();
+        let digits: String = it.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() && line[digits.len()..].starts_with(". ") {
+            return Some("输出含编号列表".to_string());
+        }
+    }
+    // 结尾周期性重复：末 k*REPEATS 个字符正好是末 k 个重复 REPEATS 次
+    const REPEATS: usize = 6;
+    for k in 1..=16usize {
+        if chars.len() < k * REPEATS {
+            break;
+        }
+        let tail = &chars[chars.len() - k * REPEATS..];
+        let unit = &tail[..k];
+        if tail.chunks(k).all(|chunk| chunk == unit) {
+            return Some(format!("输出结尾出现 {} 次重复片段", REPEATS));
+        }
+    }
+    None
+}
+
+/// 产出形态校验失败的错误前缀。不带 `(<状态码>)`，所以 retry.rs 会当成可重试错误；
+/// 调用方据此决定回落到 Amazon Transcribe。
+pub const NOT_A_TRANSCRIPT: &str = "Bedrock 转写结果不像转写稿";
 
 /// 连通性测试：最小的一次 Converse 调用，能拿到响应即视为凭证、region、模型都可用。
 pub async fn test_connectivity(cfg: &AwsConfig, model: &str) -> Result<(), String> {
@@ -394,6 +591,7 @@ pub async fn test_connectivity(cfg: &AwsConfig, model: &str) -> Result<(), Strin
         vec![ContentBlock::Text("hi".to_string())],
         &ThinkingConfig::default(),
         8,
+        None,
     )
     .await
     .map(|_| ())
@@ -639,5 +837,129 @@ mod tests {
         .await
         .expect("optimize with budget thinking");
         eprintln!("[live] optimize(haiku-4-5, thinking) → {:?}", text);
+    }
+
+    // === 转写产出校验 ===
+
+    #[test]
+    fn a_normal_transcript_passes() {
+        // 16 秒音频、约 40 字，正常
+        let text = "有一个问题，目前这个转录的精确度还是不太够。除了 Amazon Transcribe，我们还有别的选项吗？";
+        assert_eq!(transcript_defect(text, 16.0), None);
+        // 很短的音频也不要误杀：下限是 40 字
+        assert_eq!(transcript_defect("好的", 0.5), None);
+        assert_eq!(transcript_defect("测试一下功能是否正常", 1.0), None);
+    }
+
+    #[test]
+    fn answering_the_question_is_rejected_by_length() {
+        // 实测抓到的真实失败：16 秒音频，模型改去介绍 AWS 服务
+        let text = "是的，AWS 提供了多种实时语音识别服务，可以帮助你提高转录的准确性。".repeat(8);
+        let defect = transcript_defect(&text, 16.0).expect("should be rejected");
+        assert!(defect.contains("远超"), "{defect}");
+    }
+
+    #[test]
+    fn markdown_structure_is_rejected() {
+        let bold = transcript_defect("**Amazon Transcribe**：这是一个服务", 10.0);
+        assert!(bold.unwrap().contains("粗体"));
+        let heading = transcript_defect("# 服务列表\n第一项", 10.0);
+        assert!(heading.unwrap().contains("标题"));
+        let list = transcript_defect("以下是服务：\n1. Amazon Transcribe\n2. Voxtral", 10.0);
+        assert!(list.unwrap().contains("编号列表"));
+        // 口语里的「1」「第1步」不该被当成列表
+        assert_eq!(transcript_defect("第1步先开会，2点再讨论", 10.0), None);
+    }
+
+    #[test]
+    fn repetition_loop_is_rejected() {
+        // 实测抓到的真实失败：卡进「有的，」的重复循环直到撞 max_tokens
+        let text = format!("嗯，{}", "有的，".repeat(120));
+        let defect = transcript_defect(&text, 600.0).expect("should be rejected");
+        assert!(defect.contains("重复片段"), "{defect}");
+        // 单字重复也要抓到
+        let single = format!("测试{}", "啊".repeat(20));
+        assert!(transcript_defect(&single, 600.0).is_some());
+        // 正常句子里的重复词不该触发
+        assert_eq!(transcript_defect("测试测试测试，功能正常", 10.0), None);
+    }
+
+    #[test]
+    fn term_hint_keeps_latin_terms_only_and_caps_length() {
+        let vocabulary = "# 词汇表\n\n## 术语\n\n- Amazon Transcribe（实际错例：amazon的）\n- Amazon Bedrock\n- 转录（不要写成转路）\n- ByeType\n- Amazon Transcribe\n普通正文行\n";
+        let hint = term_hint_from_vocabulary(vocabulary);
+        assert!(hint.contains("Amazon Transcribe"));
+        assert!(hint.contains("Amazon Bedrock"));
+        assert!(hint.contains("ByeType"));
+        // 中文术语不进提示（挤占本就很小的指令预算）
+        assert!(!hint.contains("转录"));
+        // 括号说明要去掉，重复项只留一份
+        assert!(!hint.contains("实际错例"));
+        assert_eq!(hint.matches("Amazon Transcribe").count(), 1);
+        assert!(!hint.contains("普通正文行"));
+    }
+
+    #[test]
+    fn term_hint_is_truncated() {
+        let many: String = (0..200).map(|i| format!("- LongTermName{}\n", i)).collect();
+        let hint = term_hint_from_vocabulary(&many);
+        assert!(hint.len() <= TERM_HINT_MAX_CHARS, "len={}", hint.len());
+        assert!(hint.starts_with("LongTermName0"));
+    }
+
+    #[test]
+    fn term_hint_is_empty_for_skeleton_vocabulary() {
+        assert_eq!(
+            term_hint_from_vocabulary("# 词汇表\n\n## 人名\n\n## 术语\n"),
+            ""
+        );
+        assert_eq!(term_hint_from_vocabulary(""), "");
+    }
+
+    /// 真机联调：Voxtral 转写一段真实中文录音。
+    /// `BYETYPE_TEST_WAV` 指定 wav 样本（默认 /tmp/byetype-test-zh.wav）。
+    /// 运行：cargo test --lib live_voxtral -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "需要 AWS 凭证、网络与音频样本"]
+    async fn live_voxtral_transcribe_chinese_sample() {
+        let cfg = AwsConfig {
+            bedrock_profile: std::env::var("BYETYPE_TEST_BEDROCK_PROFILE")
+                .unwrap_or_else(|_| "bedrock".into()),
+            bedrock_region: std::env::var("BYETYPE_TEST_BEDROCK_REGION")
+                .unwrap_or_else(|_| "ap-northeast-1".into()),
+            ..AwsConfig::default()
+        };
+        let wav_path =
+            std::env::var("BYETYPE_TEST_WAV").unwrap_or_else(|_| "/tmp/byetype-test-zh.wav".into());
+        let wav = std::fs::read(&wav_path).expect("test wav sample");
+        // 走一遍管道的真实形态：先归一成内部的 FLAC，再交给 Voxtral
+        let normalized = crate::audio::input::normalize_audio(
+            wav,
+            "audio/wav",
+            600,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("normalize to flac");
+        let audio_base64 = crate::audio::encoder::audio_to_base64(&normalized.flac);
+
+        let started = std::time::Instant::now();
+        let (text, usage) = transcribe_audio(
+            &cfg,
+            &audio_base64,
+            "mistral.voxtral-small-24b-2507",
+            "Amazon, Amazon Transcribe, Amazon Bedrock, ByeType",
+        )
+        .await
+        .expect("voxtral transcribe");
+        eprintln!(
+            "[live] voxtral ({} ms, in={} out={}) → {:?}",
+            started.elapsed().as_millis(),
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            text
+        );
+        assert!(!text.trim().is_empty(), "空转写结果");
+        // 产出形态校验必须放行正常结果
+        assert_eq!(transcript_defect(&text, 600.0), None);
     }
 }

@@ -7,6 +7,7 @@ import {
   setLaunchAtLogin,
   listInputDevices,
 } from '../../../lib/tauri-api'
+import { getAudioModels } from '../../../core/models'
 import { t, useLang } from '../../../i18n'
 import { SettingGroup } from '../components/SettingGroup'
 import { SettingRow } from '../components/SettingRow'
@@ -166,6 +167,8 @@ export function GeneralTab({ config, onSave }: Props) {
     onSave({ ...config, advanced: { ...config.advanced, ...changes } })
   }
 
+  const audioModels = getAudioModels(config)
+
   const curlCommand = `curl -fsS -X POST --data-binary @recording.m4a -H 'Content-Type: audio/mp4' 'http://127.0.0.1:${config.localApi.port}/transcribe'`
 
   const defaultLabels = {
@@ -319,6 +322,22 @@ export function GeneralTab({ config, onSave }: Props) {
     style: { width: 120, textAlign: 'center', cursor: 'pointer' },
   })
 
+  // 转写引擎下拉：空值 = 跟随「转写设置」。只有语音快捷键需要，图像识别不转写。
+  const engineSelect = (value: string | undefined, onPick: (id: string) => void) => (
+    <select
+      className="select"
+      value={value ?? ''}
+      onChange={e => onPick(e.target.value)}
+      style={{ minWidth: 104 }}
+      title={t('general.transcribeEngine')}
+    >
+      <option value="">{t('general.followTranscribeSetting')}</option>
+      {audioModels.map(m => (
+        <option key={m.id} value={m.id}>{m.provider}</option>
+      ))}
+    </select>
+  )
+
   const usesModifierShortcut = [
     config.general.shortcut,
     config.general.shortcut2,
@@ -386,6 +405,7 @@ export function GeneralTab({ config, onSave }: Props) {
                 <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
+            {engineSelect(config.general.shortcutTranscribeModel, id => update({ shortcutTranscribeModel: id }))}
             <input {...shortcutInputProps(recording, setRecording, config.general.shortcut, keys1)} />
           </div>
         </SettingRow>
@@ -409,6 +429,7 @@ export function GeneralTab({ config, onSave }: Props) {
                 <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
               ))}
             </select>
+            {engineSelect(config.general.shortcut2TranscribeModel, id => update({ shortcut2TranscribeModel: id }))}
             <input {...shortcutInputProps(recording2, setRecording2, config.general.shortcut2, keys2)} />
           </div>
         </SettingRow>

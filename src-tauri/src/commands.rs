@@ -64,6 +64,9 @@ pub async fn save_config(
     let old_shortcut2_template = old_config.general.shortcut2_template.clone();
     let old_extract_shortcut_template = old_config.general.extract_shortcut_template.clone();
     let old_extract_shortcut2_template = old_config.general.extract_shortcut2_template.clone();
+    // 引擎也烘在 handler 里（决定要不要开流式通道），改了必须重新注册
+    let old_engine = old_config.general.shortcut_transcribe_model.clone();
+    let old_engine2 = old_config.general.shortcut2_transcribe_model.clone();
     local_api_manager
         .configure(app.clone(), &config.local_api)
         .await?;
@@ -81,7 +84,9 @@ pub async fn save_config(
         || config.general.shortcut_template != old_shortcut_template
         || config.general.shortcut2_template != old_shortcut2_template
         || config.general.extract_shortcut_template != old_extract_shortcut_template
-        || config.general.extract_shortcut2_template != old_extract_shortcut2_template;
+        || config.general.extract_shortcut2_template != old_extract_shortcut2_template
+        || config.general.shortcut_transcribe_model != old_engine
+        || config.general.shortcut2_transcribe_model != old_engine2;
     if shortcuts_changed {
         if let Err(e) = crate::shortcut::register(&app, recorder.clone()) {
             // 注册失败：旧快捷键已被 unregister_all 清空，且新配置（含可能非法/冲突的快捷键）已写盘。

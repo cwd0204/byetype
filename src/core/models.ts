@@ -56,6 +56,18 @@ export const BUILTIN_MODELS: ModelEntry[] = [
     supportsText: false,
     supportsVision: false,
   },
+  // 高准确度转写：协议是 bedrock 但只吃音频（唯一一个这种组合），
+  // 不支持流式输入，录完整段再传。术语识别比 Transcribe 明显更准。
+  {
+    id: 'builtin-bedrock-voxtral',
+    provider: 'Amazon Bedrock',
+    model: 'mistral.voxtral-small-24b-2507',
+    protocol: 'bedrock',
+    builtin: true,
+    supportsAudio: true,
+    supportsText: false,
+    supportsVision: false,
+  },
 ]
 
 export const DEFAULT_TRANSCRIBE_MODEL = 'builtin-aws-transcribe'

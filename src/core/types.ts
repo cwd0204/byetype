@@ -21,6 +21,9 @@ export interface GeneralConfig {
   shortcut2Template: string
   extractShortcutTemplate: string
   extractShortcut2Template: string
+  /** 两个语音快捷键各自的转写引擎；空 = 跟随「转写设置」里的转写模型 */
+  shortcutTranscribeModel?: string
+  shortcut2TranscribeModel?: string
   shortcutLabel?: string
   shortcut2Label?: string
   extractShortcutLabel?: string

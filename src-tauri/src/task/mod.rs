@@ -168,8 +168,10 @@ pub async fn run_silent_pipeline(
     template_id: Option<String>,
 ) -> Result<String, String> {
     // 本机 HTTP 接口收到的是完整音频文件，没有边录边传的机会，继续走整段路径。
-    let output = execute_pipeline(app, audio_base64, token, template_id, None, Arc::new(|_| {}))
-        .await
+    // 本机接口不区分快捷键，引擎跟随「转写设置」（空串）
+    let output =
+        execute_pipeline(app, audio_base64, token, template_id, String::new(), None, Arc::new(|_| {}))
+            .await
         .map_err(|failure| failure.message)?;
     Ok(output.final_text)
 }
@@ -206,6 +208,8 @@ pub fn process_recording(
     task_id: u32,
     audio_base64: String,
     template_id: String,
+    // 本次录音用哪个转写引擎（按快捷键可覆盖全局设置），空 = 跟随「转写设置」
+    engine_id: String,
     live: Option<LiveTranscribe>,
 ) {
     let token = {
@@ -219,7 +223,7 @@ pub fn process_recording(
     };
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        run_pipeline(&app_handle, task_id, audio_base64, None, token, template_id, live).await;
+        run_pipeline(&app_handle, task_id, audio_base64, None, token, template_id, engine_id, live).await;
     });
 }
 
@@ -332,7 +336,18 @@ pub fn retry_record(app: &AppHandle, record_id: u64) -> Result<(), String> {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         // 重试的是历史里那段完整音频，只能走整段路径。
-        run_pipeline(&app_handle, task_id, audio_base64, Some(record_id), token, template_id, None).await;
+        // 重试沿用「转写设置」里的全局引擎（历史记录没存当时用的是哪个快捷键）
+        run_pipeline(
+            &app_handle,
+            task_id,
+            audio_base64,
+            Some(record_id),
+            token,
+            template_id,
+            String::new(),
+            None,
+        )
+        .await;
     });
     Ok(())
 }
@@ -363,6 +378,7 @@ async fn run_pipeline(
     retry_record_id: Option<u64>,
     token: CancellationToken,
     template_id: String,
+    engine_id: String,
     live: Option<LiveTranscribe>,
 ) {
     let pipeline_started = std::time::Instant::now();
@@ -390,6 +406,7 @@ async fn run_pipeline(
         audio_base64.clone(),
         token.clone(),
         (!template_id.is_empty()).then_some(template_id),
+        engine_id,
         live,
         observer,
     )
@@ -463,7 +480,11 @@ async fn run_pipeline(
 /// 任何失败（凭证、建流、流中途报错、超时、结果为空）都返回 `None`，由调用方
 /// 回退整段路径。这里**不套 `with_retry`**：流已经结束，重试只能重新录音。
 /// 失败原因只打日志不报给用户 —— 对用户来说这条路径只是加速，退回去仍然能用。
-async fn await_live_transcribe(config: &AppConfig, live: LiveTranscribe) -> Option<ai::AiOutput> {
+async fn await_live_transcribe(
+    config: &AppConfig,
+    live: LiveTranscribe,
+    model_id: &str,
+) -> Option<ai::AiOutput> {
     let timeout = Duration::from_secs(config.advanced.transcribe_timeout as u64);
     let text = match live.finish(timeout).await {
         Ok(text) if !text.trim().is_empty() => text,
@@ -478,7 +499,7 @@ async fn await_live_transcribe(config: &AppConfig, live: LiveTranscribe) -> Opti
             return None;
         }
     };
-    match ai::transcribe_live_output(config, text) {
+    match ai::transcribe_live_output(config, text, model_id) {
         Ok(output) => Some(output),
         Err(e) => {
             eprintln!("[Live] 流式转写结果无法归集模型信息，回退整段上传：{}", e);
@@ -492,6 +513,7 @@ async fn execute_pipeline(
     audio_base64: String,
     token: CancellationToken,
     template_id: Option<String>,
+    engine_id: String,
     live: Option<LiveTranscribe>,
     observer: Arc<dyn Fn(PipelineEvent) + Send + Sync>,
 ) -> Result<PipelineOutput, PipelineFailure> {
@@ -513,6 +535,9 @@ async fn execute_pipeline(
     )?;
 
     observer(PipelineEvent::Transcribing);
+
+    // 本次实际使用的转写引擎：快捷键上的覆盖值优先，空则跟随「转写设置」
+    let transcribe_model = ai::models::effective_transcribe_model(&config, &engine_id);
     let retry_observer = observer.clone();
     let transcribe_started = std::time::Instant::now();
     // 尝试次数进 timing.jsonl，让「耗时很长」能和「重试过」对上号。
@@ -525,7 +550,7 @@ async fn execute_pipeline(
         Some(live) => {
             transcribe_attempts += 1;
             tokio::select! {
-                output = await_live_transcribe(&config, live) => output,
+                output = await_live_transcribe(&config, live, &transcribe_model) => output,
                 _ = token.cancelled() => return Err(PipelineFailure {
                     message: "任务已取消".to_string(),
                     transcribe_text: None,
@@ -551,6 +576,7 @@ async fn execute_pipeline(
                 let config = config.clone();
                 let prompts_dir = prompts_dir.clone();
                 let learning_rules = learning_rules.clone();
+                let transcribe_model = transcribe_model.clone();
                 tokio::select! {
                     result = ai::retry::with_retry(
                         || {
@@ -559,6 +585,7 @@ async fn execute_pipeline(
                             let config = config.clone();
                             let prompts_dir = prompts_dir.clone();
                             let learning_rules = learning_rules.clone();
+                            let model = transcribe_model.clone();
                             async move {
                                 ai::transcribe(
                                     &client,
@@ -566,6 +593,7 @@ async fn execute_pipeline(
                                     &config,
                                     &prompts_dir,
                                     &learning_rules,
+                                    &model,
                                 )
                                 .await
                             }
@@ -619,6 +647,7 @@ async fn execute_pipeline(
         let config = config.clone();
         let prompts_dir = prompts_dir.clone();
         let learning_rules = learning_rules.clone();
+        let transcribe_model = transcribe_model.clone();
         tokio::select! {
             result = ai::retry::with_retry(
                 || {
@@ -628,6 +657,7 @@ async fn execute_pipeline(
                     let prompts_dir = prompts_dir.clone();
                     let template_id = template_id.clone();
                     let learning_rules = learning_rules.clone();
+                    let engine = transcribe_model.clone();
                     async move {
                         ai::optimize(
                             &client,
@@ -636,6 +666,7 @@ async fn execute_pipeline(
                             &prompts_dir,
                             &template_id,
                             &learning_rules,
+                            &engine,
                         )
                         .await
                     }

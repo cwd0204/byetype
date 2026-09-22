@@ -1,4 +1,5 @@
-const SAMPLE_RATE: u32 = 16_000;
+/// 内部统一的采样率：采集、FLAC 编码与转 WAV 都用这个。
+pub const SAMPLE_RATE: u32 = 16_000;
 
 /// Encode PCM i16 samples into a FLAC byte buffer.
 /// Lossless compression, typically ~50% smaller than WAV.
@@ -168,4 +169,64 @@ fn encode_flac_inner(
 pub fn audio_to_base64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// 给 16 位单声道小端 PCM 套一个 44 字节的标准 WAV 头。
+///
+/// Bedrock 上的 Voxtral 只接受 `mp3` 与 `wav`，不认我们内部用的 FLAC，所以那条路径要在
+/// 发送前转成 WAV。这里只补头不重采样，输入必须已经是单声道 16 位小端。
+pub fn wrap_pcm16_as_wav(pcm_le_bytes: &[u8], sample_rate: u32) -> Vec<u8> {
+    let data_len = pcm_le_bytes.len() as u32;
+    let mut wav = Vec::with_capacity(44 + pcm_le_bytes.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk 长度
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // 单声道
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // 字节率 = 采样率 × 2 字节
+    wav.extend_from_slice(&2u16.to_le_bytes()); // 每帧字节数
+    wav.extend_from_slice(&16u16.to_le_bytes()); // 位深
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm_le_bytes);
+    wav
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wav_header_is_canonical() {
+        let pcm: Vec<u8> = (0i16..4).flat_map(|s| s.to_le_bytes()).collect();
+        let wav = wrap_pcm16_as_wav(&pcm, SAMPLE_RATE);
+        assert_eq!(wav.len(), 44 + pcm.len());
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(&wav[36..40], b"data");
+        // RIFF 长度 = 文件长度 - 8
+        assert_eq!(
+            u32::from_le_bytes(wav[4..8].try_into().unwrap()),
+            (wav.len() - 8) as u32
+        );
+        assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 1); // PCM
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1); // 单声道
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), SAMPLE_RATE);
+        assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16); // 位深
+        assert_eq!(
+            u32::from_le_bytes(wav[40..44].try_into().unwrap()),
+            pcm.len() as u32
+        );
+        assert_eq!(&wav[44..], &pcm[..]);
+    }
+
+    #[test]
+    fn wav_header_handles_empty_pcm() {
+        let wav = wrap_pcm16_as_wav(&[], SAMPLE_RATE);
+        assert_eq!(wav.len(), 44);
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 0);
+    }
 }

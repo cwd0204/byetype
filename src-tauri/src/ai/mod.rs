@@ -57,21 +57,76 @@ pub async fn transcribe(
     _client: &reqwest::Client,
     audio_base64: &str,
     config: &AppConfig,
-    _prompts_dir: &Path,
+    prompts_dir: &Path,
     _learning_rules: &str,
+    model_id: &str,
 ) -> Result<AiOutput, String> {
     transcribe_audio(
         audio_base64,
         config,
-        &config.transcribe.model_id,
+        model_id,
         "transcribe",
         TranscribeOptions::default(),
+        Some(prompts_dir),
     )
     .await
 }
 
 /// 用指定音频模型转写一段 FLAC(base64)。听写与会议分段共用，区别只在场景与说话人分离开关。
+///
+/// 两条音频通道：`aws-transcribe` 协议走流式 ASR；Bedrock 上支持音频的模型（Voxtral）
+/// 走 Converse 整段上传。后者产出不像转写稿时自动回落到前者，用户照样拿到文字。
 pub async fn transcribe_audio(
+    audio_base64: &str,
+    config: &AppConfig,
+    model_id: &str,
+    scene: &str,
+    opts: TranscribeOptions,
+    prompts_dir: Option<&Path>,
+) -> Result<AiOutput, String> {
+    let resolved = models::resolve_model(config, model_id)?;
+    if !resolved.supports_audio {
+        return Err(tr_fmt(
+            "err.modelNoAudio",
+            &[("model", resolved.model.as_str())],
+        ));
+    }
+
+    if resolved.protocol == PROTOCOL_BEDROCK {
+        // 词汇表里的英文术语做成一行短提示，能让它别把 Amazon 译成亚马逊
+        let term_hint = prompts_dir
+            .map(|dir| {
+                let (_, vocabulary) =
+                    prompt::load_transcription_reference_content(config, dir).unwrap_or_default();
+                bedrock::term_hint_from_vocabulary(&vocabulary)
+            })
+            .unwrap_or_default();
+        match bedrock::transcribe_audio(
+            &config.models.aws,
+            audio_base64,
+            &resolved.model,
+            &term_hint,
+        )
+        .await
+        {
+            Ok((text, usage)) => {
+                record_usage(scene, &resolved, usage);
+                return Ok(ai_output(text, &resolved));
+            }
+            Err(error) if error.starts_with(bedrock::NOT_A_TRANSCRIPT) => {
+                // 模型改去回答问题、卡进重复循环、或录音太长：换默认引擎重转，别让这段话白说。
+                eprintln!("[transcribe] {}，回落到 Amazon Transcribe", error);
+            }
+            Err(error) => return Err(error),
+        }
+        return transcribe_with_aws(audio_base64, config, models::DEFAULT_TRANSCRIBE_MODEL, scene, opts)
+            .await;
+    }
+
+    transcribe_with_aws(audio_base64, config, model_id, scene, opts).await
+}
+
+async fn transcribe_with_aws(
     audio_base64: &str,
     config: &AppConfig,
     model_id: &str,
@@ -93,10 +148,10 @@ pub async fn transcribe_audio(
     Ok(ai_output(text, &resolved))
 }
 
-/// 听写能不能走「边说边转写」。只有解析出来的转写模型确实是 Amazon Transcribe
-/// 才开流：自定义模型可能是别的协议，那条路径没有流式实现。
-pub fn live_transcribe_supported(config: &AppConfig) -> bool {
-    models::resolve_model(config, &config.transcribe.model_id)
+/// 听写能不能走「边说边转写」。只有 Amazon Transcribe 有流式实现：
+/// Bedrock 上的音频模型（Voxtral）只能整段上传，自定义模型也没有流式通道。
+pub fn live_transcribe_supported(config: &AppConfig, model_id: &str) -> bool {
+    models::resolve_model(config, model_id)
         .map(|resolved| resolved.protocol == PROTOCOL_AWS_TRANSCRIBE)
         .unwrap_or(false)
 }
@@ -105,8 +160,12 @@ pub fn live_transcribe_supported(config: &AppConfig) -> bool {
 ///
 /// 流式路径绕过了 `transcribe_audio`，但 `usage.jsonl` 的行数语义必须保持不变：
 /// 每次录音仍然只有一条 `transcribe` 行，且模型字段与整段路径一致。
-pub fn transcribe_live_output(config: &AppConfig, text: String) -> Result<AiOutput, String> {
-    let resolved = models::resolve_model(config, &config.transcribe.model_id)?;
+pub fn transcribe_live_output(
+    config: &AppConfig,
+    text: String,
+    model_id: &str,
+) -> Result<AiOutput, String> {
+    let resolved = models::resolve_model(config, model_id)?;
     record_usage("transcribe", &resolved, TokenUsage::default());
     Ok(ai_output(text, &resolved))
 }
@@ -132,8 +191,11 @@ fn extract_model_id(config: &AppConfig) -> &str {
 }
 
 /// `what_key` 是 i18n 里 `what.*` 的用途名（图像识别 / 文本优化 / 文本处理）。
+///
+/// 除了协议，还要挡掉「协议是 Bedrock 但只吃音频」的模型（Voxtral）：它能通过协议检查，
+/// 但拿它做文本优化会直接失败。
 fn require_bedrock(resolved: &models::ResolvedModel, what_key: &str) -> Result<(), String> {
-    if resolved.protocol != PROTOCOL_BEDROCK {
+    if resolved.protocol != PROTOCOL_BEDROCK || resolved.supports_audio {
         return Err(tr_fmt(
             "err.modelTranscribeOnly",
             &[("model", resolved.model.as_str()), ("what", tr(what_key))],
@@ -193,9 +255,15 @@ pub async fn optimize(
     prompts_dir: &Path,
     template_id: &str,
     learning_rules: &str,
+    transcribe_model_id: &str,
 ) -> Result<AiOutput, String> {
-    let system_prompt =
-        prompt::build_optimize_prompt(config, prompts_dir, template_id, learning_rules);
+    let system_prompt = prompt::build_optimize_prompt(
+        config,
+        prompts_dir,
+        template_id,
+        learning_rules,
+        transcribe_model_id,
+    );
     if system_prompt.is_empty() {
         // 提示词为空时不会发起 API 调用，不计入用量
         return Ok(AiOutput {
